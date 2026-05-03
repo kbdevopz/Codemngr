@@ -2482,6 +2482,9 @@ export default function ChatView(props: ChatViewProps) {
         createdAt: new Date().toISOString(),
         ...(queuedImages.length > 0 ? { images: queuedImages } : {}),
         ...(liveTerminalContexts.length > 0 ? { terminalContexts: liveTerminalContexts } : {}),
+        modelSelection: sendCtx.selectedModelSelection,
+        runtimeMode,
+        interactionMode,
       });
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -2800,6 +2803,15 @@ export default function ChatView(props: ChatViewProps) {
     promptRef.current = taken.text;
     composerImagesRef.current = hydratedImages;
     composerTerminalContextsRef.current = [...queuedTerminalContexts];
+    if (taken.modelSelection) {
+      setComposerDraftModelSelection(composerDraftTarget, taken.modelSelection);
+    }
+    if (taken.runtimeMode) {
+      setComposerDraftRuntimeMode(composerDraftTarget, taken.runtimeMode);
+    }
+    if (taken.interactionMode) {
+      setComposerDraftInteractionMode(composerDraftTarget, taken.interactionMode);
+    }
     setComposerDraftPrompt(composerDraftTarget, taken.text);
     if (hydratedImages.length > 0) {
       addComposerDraftImages(composerDraftTarget, hydratedImages);
@@ -2824,6 +2836,9 @@ export default function ChatView(props: ChatViewProps) {
     setComposerDraftPrompt,
     addComposerDraftImages,
     setComposerDraftTerminalContexts,
+    setComposerDraftModelSelection,
+    setComposerDraftRuntimeMode,
+    setComposerDraftInteractionMode,
     takeNextQueuedMessage,
   ]);
 

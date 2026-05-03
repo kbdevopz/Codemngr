@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
+import type { ModelSelection, ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 import type { PersistedComposerImageAttachment } from "./composerDraftStore";
 import type { TerminalContextDraft } from "./lib/terminalContext";
@@ -45,6 +46,15 @@ export interface QueuedMessageEntry {
    * to non-expired contexts at the call site before enqueueing.
    */
   terminalContexts?: ReadonlyArray<TerminalContextDraft>;
+  /**
+   * Model + runtime + interaction snapshot taken at enqueue time. On
+   * flush we restore these into the composer's draft store before the
+   * dispatch, so a message queued with provider/model/effort A still
+   * runs with A even if the user switched to B in the meantime.
+   */
+  modelSelection?: ModelSelection;
+  runtimeMode?: RuntimeMode;
+  interactionMode?: ProviderInteractionMode;
 }
 
 export interface ComposerQueueStoreState {
