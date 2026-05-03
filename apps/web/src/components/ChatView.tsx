@@ -2006,6 +2006,24 @@ export default function ChatView(props: ChatViewProps) {
     legendListRef.current?.scrollToEnd?.({ animated });
   }, []);
 
+  // Snap the timeline to the bottom for a new send: reset isAtEndRef so
+  // maintainScrollAtEnd will pin to the optimistic message, hide the
+  // scroll-to-bottom pill, and scroll. Caller should also schedule a
+  // post-render scrollToEnd (via rAF) so users scrolled past the
+  // maintainScrollAtEndThreshold still snap to the new message.
+  const pinTimelineToBottomBeforeSend = useCallback(async () => {
+    isAtEndRef.current = true;
+    showScrollDebouncer.current.cancel();
+    setShowScrollToBottom(false);
+    await legendListRef.current?.scrollToEnd?.({ animated: false });
+  }, []);
+
+  const scrollToEndOnNextFrame = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      legendListRef.current?.scrollToEnd?.({ animated: false });
+    });
+  }, []);
+
   // Debounce *showing* the scroll-to-bottom pill so it doesn't flash during
   // thread switches.  LegendList fires scroll events with isAtEnd=false while
   // initialScrollAtEnd is settling; hiding is always immediate.
@@ -2521,13 +2539,10 @@ export default function ChatView(props: ChatViewProps) {
       sizeBytes: image.sizeBytes,
       previewUrl: image.previewUrl,
     }));
-    // Scroll to the current end *before* adding the optimistic message.
-    // This sets LegendList's internal isAtEnd=true so maintainScrollAtEnd
-    // automatically pins to the new item when the data changes.
-    isAtEndRef.current = true;
-    showScrollDebouncer.current.cancel();
-    setShowScrollToBottom(false);
-    await legendListRef.current?.scrollToEnd?.({ animated: false });
+    // Pre-send scroll lets LegendList's maintainScrollAtEnd pin to the new
+    // item; the rAF after the optimistic insert handles users scrolled
+    // beyond maintainScrollAtEndThreshold where the pin would otherwise miss.
+    await pinTimelineToBottomBeforeSend();
 
     setOptimisticUserMessages((existing) => [
       ...existing,
@@ -2540,6 +2555,7 @@ export default function ChatView(props: ChatViewProps) {
         streaming: false,
       },
     ]);
+    scrollToEndOnNextFrame();
 
     setThreadError(threadIdForSend, null);
     if (expiredTerminalContextCount > 0) {
@@ -2918,11 +2934,7 @@ export default function ChatView(props: ChatViewProps) {
       beginLocalDispatch({ preparingWorktree: false });
       setThreadError(threadIdForSend, null);
 
-      // Scroll to the current end *before* adding the optimistic message.
-      isAtEndRef.current = true;
-      showScrollDebouncer.current.cancel();
-      setShowScrollToBottom(false);
-      await legendListRef.current?.scrollToEnd?.({ animated: false });
+      await pinTimelineToBottomBeforeSend();
 
       setOptimisticUserMessages((existing) => [
         ...existing,
@@ -2934,6 +2946,7 @@ export default function ChatView(props: ChatViewProps) {
           streaming: false,
         },
       ]);
+      scrollToEndOnNextFrame();
 
       try {
         await persistThreadSettingsForNextTurn({
@@ -3009,6 +3022,8 @@ export default function ChatView(props: ChatViewProps) {
       setThreadError,
       autoOpenPlanSidebar,
       environmentId,
+      pinTimelineToBottomBeforeSend,
+      scrollToEndOnNextFrame,
     ],
   );
 

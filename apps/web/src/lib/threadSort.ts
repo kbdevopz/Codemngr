@@ -7,6 +7,11 @@ export type ThreadSortInput = Pick<Thread, "createdAt" | "updatedAt"> & {
   messages?: Pick<Thread["messages"][number], "createdAt" | "role">[];
 };
 
+// Hard cap applied to the sidebar thread list per project so old threads
+// don't crowd the sidebar. Older threads remain in the database and show
+// up in archive views; this only affects sidebar rendering.
+export const MAX_VISIBLE_SIDEBAR_THREADS_PER_PROJECT = 10;
+
 export function toSortableTimestamp(iso: string | undefined): number | null {
   if (!iso) return null;
   const ms = Date.parse(iso);

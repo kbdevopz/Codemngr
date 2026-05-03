@@ -162,7 +162,7 @@ import {
   useThreadJumpHintVisibility,
   ThreadStatusPill,
 } from "./Sidebar.logic";
-import { sortThreads } from "../lib/threadSort";
+import { MAX_VISIBLE_SIDEBAR_THREADS_PER_PROJECT, sortThreads } from "../lib/threadSort";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { CommandDialogTrigger } from "./ui/command";
@@ -1108,7 +1108,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     const visibleProjectThreads = sortThreads(
       projectThreads.filter((thread) => thread.archivedAt === null),
       threadSortOrder,
-    );
+    ).slice(0, MAX_VISIBLE_SIDEBAR_THREADS_PER_PROJECT);
     const projectStatus = resolveProjectStatusIndicator(
       visibleProjectThreads.map((thread) => resolveProjectThreadStatus(thread)),
     );
@@ -3006,7 +3006,7 @@ export default function Sidebar() {
             (thread) => thread.archivedAt === null,
           ),
           sidebarThreadSortOrder,
-        );
+        ).slice(0, MAX_VISIBLE_SIDEBAR_THREADS_PER_PROJECT);
         const projectExpanded = projectExpandedById[project.projectKey] ?? true;
         const activeThreadKey = routeThreadKey ?? undefined;
         const pinnedCollapsedThread =
