@@ -82,4 +82,36 @@ describe("composerQueueStore", () => {
     const ids = new Set([newQueuedMessageId(), newQueuedMessageId(), newQueuedMessageId()]);
     expect(ids.size).toBe(3);
   });
+
+  it("preserves images and terminal contexts captured at enqueue time", () => {
+    const entry = {
+      ...makeEntry("with attachments"),
+      images: [
+        {
+          id: "image-1",
+          name: "screenshot.png",
+          mimeType: "image/png",
+          sizeBytes: 100,
+          dataUrl: "data:image/png;base64,iVBORw0KGgo=",
+        },
+      ],
+      terminalContexts: [
+        {
+          id: "context-1",
+          threadId: "thread-1" as never,
+          createdAt: "2026-05-03T14:00:00.000Z",
+          terminalId: "term-1",
+          terminalLabel: "zsh",
+          lineStart: 0,
+          lineEnd: 5,
+          text: "$ ls\nfile.txt",
+        },
+      ],
+    };
+    const { enqueue } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, entry);
+    const stored = useComposerQueueStore.getState().queueByThreadKey[THREAD_A]?.[0];
+    expect(stored?.images?.[0]?.id).toBe("image-1");
+    expect(stored?.terminalContexts?.[0]?.id).toBe("context-1");
+  });
 });

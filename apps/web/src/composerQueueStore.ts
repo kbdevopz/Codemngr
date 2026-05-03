@@ -2,13 +2,14 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
+import type { PersistedComposerImageAttachment } from "./composerDraftStore";
+import type { TerminalContextDraft } from "./lib/terminalContext";
 
 // Per-thread queue of messages waiting to be sent while a turn is in
-// progress. Attachments and terminal contexts are intentionally not
-// queued yet — that requires factoring the dispatch path in ChatView's
-// onSend into a snapshot-driven helper. Until then, attempting to queue
-// a message with attachments falls back to the existing drop behavior
-// at the call site, so this is purely additive.
+// progress. Each entry carries the prompt text plus a snapshot of any
+// images and terminal contexts captured at enqueue time, so a queued
+// message can be dispatched even after the user has cleared the
+// composer or attached different content.
 //
 // Persistence: queues survive reload via localStorage with a debounced
 // writer (300ms). On unload we flush so an in-flight write doesn't drop
@@ -34,6 +35,16 @@ export interface QueuedMessageEntry {
   id: string;
   text: string;
   createdAt: string;
+  /**
+   * Image attachments captured at enqueue time. Persisted as data URLs
+   * (the same shape composerDraftStore uses) so they survive reload.
+   */
+  images?: ReadonlyArray<PersistedComposerImageAttachment>;
+  /**
+   * Terminal contexts captured at enqueue time. May be empty. Filtered
+   * to non-expired contexts at the call site before enqueueing.
+   */
+  terminalContexts?: ReadonlyArray<TerminalContextDraft>;
 }
 
 export interface ComposerQueueStoreState {

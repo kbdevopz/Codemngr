@@ -128,6 +128,8 @@ import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
+  hydrateImagesFromPersisted,
+  type PersistedComposerImageAttachment,
   useComposerDraftStore,
   type DraftId,
 } from "../composerDraftStore";
@@ -2438,12 +2440,13 @@ export default function ChatView(props: ChatViewProps) {
     const api = readEnvironmentApi(environmentId);
     if (!api || !activeThread || isConnecting || sendInFlightRef.current) return;
 
-    // Queueing fast-path: while a turn is in flight, a plain-text submit is
-    // pushed onto the per-thread queue and the composer is cleared. The
-    // queue flush effect dispatches one entry per turn-settled transition.
-    // Anything that isn't plain text (attachments, terminal contexts,
-    // plan follow-ups, slash commands, pending input) falls through to the
-    // existing isSendBusy drop, matching the prior behavior.
+    // Queueing fast-path: while a turn is in flight, the submit is
+    // captured (text + images + terminal contexts) onto the per-thread
+    // queue and the composer is cleared. The flush effect dispatches one
+    // entry per latestTurnSettled transition by restoring the snapshot
+    // back into the composer and calling onSend. Plan follow-ups, slash
+    // commands and active pending input answers still drop because they
+    // have their own dispatch paths that aren't queue-aware yet.
     const turnInFlight = isSendBusy || phase === "running";
     if (turnInFlight) {
       if (activePendingProgress) return;
@@ -2452,15 +2455,33 @@ export default function ChatView(props: ChatViewProps) {
       const liveTerminalContexts = sendCtx.terminalContexts.filter(
         (context) => !isTerminalContextExpired(context),
       );
-      if (sendCtx.images.length > 0 || liveTerminalContexts.length > 0) return;
       const trimmed = promptRef.current.trim();
-      if (!trimmed) return;
+      const hasContent =
+        trimmed.length > 0 || sendCtx.images.length > 0 || liveTerminalContexts.length > 0;
+      if (!hasContent) return;
       if (showPlanFollowUpPrompt && activeProposedPlan) return;
-      if (parseStandaloneComposerSlashCommand(trimmed)) return;
+      if (
+        sendCtx.images.length === 0 &&
+        liveTerminalContexts.length === 0 &&
+        parseStandaloneComposerSlashCommand(trimmed)
+      ) {
+        return;
+      }
+      const queuedImages: PersistedComposerImageAttachment[] = await Promise.all(
+        sendCtx.images.map(async (image) => ({
+          id: image.id,
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+          dataUrl: await readFileAsDataUrl(image.file),
+        })),
+      );
       enqueueComposerMessage(routeThreadKey, {
         id: newQueuedMessageId(),
         text: trimmed,
         createdAt: new Date().toISOString(),
+        ...(queuedImages.length > 0 ? { images: queuedImages } : {}),
+        ...(liveTerminalContexts.length > 0 ? { terminalContexts: liveTerminalContexts } : {}),
       });
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -2763,8 +2784,10 @@ export default function ChatView(props: ChatViewProps) {
   // Flush the next queued message once the active turn has settled. Done one
   // at a time so the dispatch path stays the same as a manual submit; if a
   // dispatch fails or starts a new turn, the next flush waits until that
-  // turn also settles. The microtask delay lets composer state propagate
-  // through the draft store before onSend reads from promptRef.
+  // turn also settles. We restore the queued snapshot back into composer
+  // state (prompt + images + terminal contexts) using the same setters
+  // the retry-on-error path uses, then trigger onSend on a microtask so
+  // the draft-store updates have committed before onSend reads them.
   useEffect(() => {
     if (!queueHeadId) return;
     if (!latestTurnSettled) return;
@@ -2772,8 +2795,21 @@ export default function ChatView(props: ChatViewProps) {
     if (phase === "running") return;
     const taken = takeNextQueuedMessage(routeThreadKey);
     if (!taken) return;
+    const hydratedImages = taken.images ? hydrateImagesFromPersisted(taken.images) : [];
+    const queuedTerminalContexts = taken.terminalContexts ?? [];
     promptRef.current = taken.text;
+    composerImagesRef.current = hydratedImages;
+    composerTerminalContextsRef.current = [...queuedTerminalContexts];
     setComposerDraftPrompt(composerDraftTarget, taken.text);
+    if (hydratedImages.length > 0) {
+      addComposerDraftImages(composerDraftTarget, hydratedImages);
+    }
+    setComposerDraftTerminalContexts(composerDraftTarget, [...queuedTerminalContexts]);
+    composerRef.current?.resetCursorState({
+      cursor: collapseExpandedComposerCursor(taken.text, taken.text.length),
+      prompt: taken.text,
+      detectTrigger: false,
+    });
     void Promise.resolve().then(() => {
       void onSendRef.current?.();
     });
@@ -2786,6 +2822,8 @@ export default function ChatView(props: ChatViewProps) {
     routeThreadKey,
     composerDraftTarget,
     setComposerDraftPrompt,
+    addComposerDraftImages,
+    setComposerDraftTerminalContexts,
     takeNextQueuedMessage,
   ]);
 
