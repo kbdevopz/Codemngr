@@ -132,13 +132,20 @@ import {
   type DraftId,
 } from "../composerDraftStore";
 import {
+  newQueuedMessageId,
+  useComposerQueueStore,
+  useQueueHeadIdForThread,
+} from "../composerQueueStore";
+import {
   appendTerminalContextsToPrompt,
   formatTerminalContextLabel,
+  isTerminalContextExpired,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import { ComposerQueuedMessages } from "./chat/ComposerQueuedMessages";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -2024,6 +2031,16 @@ export default function ChatView(props: ChatViewProps) {
     });
   }, []);
 
+  // MVP message queueing: while a turn is running, plain-text submits are
+  // pushed onto a per-thread queue; we flush one entry at a time when
+  // latestTurnSettled flips back to true. The send pipeline still
+  // refuses sends with attachments / terminal contexts during a turn,
+  // since queueing those requires a snapshot-driven dispatch refactor.
+  const enqueueComposerMessage = useComposerQueueStore((store) => store.enqueue);
+  const takeNextQueuedMessage = useComposerQueueStore((store) => store.takeNext);
+  const queueHeadId = useQueueHeadIdForThread(routeThreadKey);
+  const onSendRef = useRef<((e?: { preventDefault: () => void }) => Promise<void>) | null>(null);
+
   // Debounce *showing* the scroll-to-bottom pill so it doesn't flash during
   // thread switches.  LegendList fires scroll events with isAtEnd=false while
   // initialScrollAtEnd is settling; hiding is always immediate.
@@ -2419,7 +2436,39 @@ export default function ChatView(props: ChatViewProps) {
   const onSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
     const api = readEnvironmentApi(environmentId);
-    if (!api || !activeThread || isSendBusy || isConnecting || sendInFlightRef.current) return;
+    if (!api || !activeThread || isConnecting || sendInFlightRef.current) return;
+
+    // Queueing fast-path: while a turn is in flight, a plain-text submit is
+    // pushed onto the per-thread queue and the composer is cleared. The
+    // queue flush effect dispatches one entry per turn-settled transition.
+    // Anything that isn't plain text (attachments, terminal contexts,
+    // plan follow-ups, slash commands, pending input) falls through to the
+    // existing isSendBusy drop, matching the prior behavior.
+    const turnInFlight = isSendBusy || phase === "running";
+    if (turnInFlight) {
+      if (activePendingProgress) return;
+      const sendCtx = composerRef.current?.getSendContext();
+      if (!sendCtx) return;
+      const liveTerminalContexts = sendCtx.terminalContexts.filter(
+        (context) => !isTerminalContextExpired(context),
+      );
+      if (sendCtx.images.length > 0 || liveTerminalContexts.length > 0) return;
+      const trimmed = promptRef.current.trim();
+      if (!trimmed) return;
+      if (showPlanFollowUpPrompt && activeProposedPlan) return;
+      if (parseStandaloneComposerSlashCommand(trimmed)) return;
+      enqueueComposerMessage(routeThreadKey, {
+        id: newQueuedMessageId(),
+        text: trimmed,
+        createdAt: new Date().toISOString(),
+      });
+      promptRef.current = "";
+      clearComposerDraftContent(composerDraftTarget);
+      composerRef.current?.resetCursorState();
+      return;
+    }
+
+    if (isSendBusy) return;
     if (activePendingProgress) {
       onAdvanceActivePendingUserInput();
       return;
@@ -2708,6 +2757,37 @@ export default function ChatView(props: ChatViewProps) {
       resetLocalDispatch();
     }
   };
+
+  onSendRef.current = onSend;
+
+  // Flush the next queued message once the active turn has settled. Done one
+  // at a time so the dispatch path stays the same as a manual submit; if a
+  // dispatch fails or starts a new turn, the next flush waits until that
+  // turn also settles. The microtask delay lets composer state propagate
+  // through the draft store before onSend reads from promptRef.
+  useEffect(() => {
+    if (!queueHeadId) return;
+    if (!latestTurnSettled) return;
+    if (isSendBusy || isConnecting || sendInFlightRef.current) return;
+    if (phase === "running") return;
+    const taken = takeNextQueuedMessage(routeThreadKey);
+    if (!taken) return;
+    promptRef.current = taken.text;
+    setComposerDraftPrompt(composerDraftTarget, taken.text);
+    void Promise.resolve().then(() => {
+      void onSendRef.current?.();
+    });
+  }, [
+    queueHeadId,
+    latestTurnSettled,
+    isSendBusy,
+    isConnecting,
+    phase,
+    routeThreadKey,
+    composerDraftTarget,
+    setComposerDraftPrompt,
+    takeNextQueuedMessage,
+  ]);
 
   const onInterrupt = async () => {
     const api = readEnvironmentApi(environmentId);
@@ -3397,6 +3477,9 @@ export default function ChatView(props: ChatViewProps) {
                 : "pb-[calc(env(safe-area-inset-bottom)+0.75rem)] sm:pb-[calc(env(safe-area-inset-bottom)+1rem)]",
             )}
           >
+            <div className="mx-auto w-full min-w-0 max-w-208">
+              <ComposerQueuedMessages threadKey={routeThreadKey} />
+            </div>
             <ChatComposer
               ref={composerRef}
               composerDraftTarget={composerDraftTarget}
