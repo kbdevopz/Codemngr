@@ -1,63 +1,36 @@
-# T3 Code
+# Codemngr
 
-T3 Code is a minimal web GUI for coding agents (currently Codex and Claude, more coming soon).
+A multi-account desktop GUI for coding agents (Claude Code, Codex, more to come).
 
-## Installation
+Codemngr lets you manage multiple AI subscriptions side-by-side — work, personal, and client accounts — without symlink swaps, manual logouts, or env-var juggling. Each pane runs against the right account, automatically.
 
-> [!WARNING]
-> T3 Code currently supports Codex, Claude, and OpenCode.
-> Install and authenticate at least one provider before use:
->
-> - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
-> - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
-> - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
+## Why
 
-### Run without installing
+Most coding-agent UIs assume one account per machine. In practice, people have:
 
-```bash
-npx t3
-```
+- A work sub billed to their employer (e.g. Cogwheel.tech)
+- A separate sub for a second job or contract (e.g. PremierStudio.ai)
+- Per-client subs (e.g. Midwest Machinery)
+- A personal sub for side projects
 
-### Desktop app
+Mixing them is a billing, compliance, and trust-boundary problem. Codemngr makes account-per-project the default — you pick which subscription a project uses, and every session in that project uses it.
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
+## Status
 
-#### Windows (`winget`)
+Early development. Forked from [T3 Code](https://github.com/pingdotgg/t3code) (MIT) on 2026-05-03, with multi-account architecture as the primary focus. Concepts on credential-directory layout and shared-settings symlinks are inspired by [Jean Claude](https://github.com/MikeVeerman/jean-claude) (MIT).
+
+## Local development
 
 ```bash
-winget install T3Tools.T3Code
-```
-
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Arch Linux (AUR)
-
-```bash
-yay -S t3code-bin
-```
-
-## Some notes
-
-We are very very early in this project. Expect bugs.
-
-We are not accepting contributions yet.
-
-Observability guide: [docs/observability.md](./docs/observability.md)
-
-## If you REALLY want to contribute still.... read this first
-
-Before local development, prepare the environment and install dependencies:
-
-```bash
-# Optional: only needed if you use mise for dev tool management.
+# Optional: install pinned dev tools via mise
 mise install
-bun install .
+
+bun install
+bun run dev
 ```
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening an issue or PR.
+## Attribution
 
-Need support? Join the [Discord](https://discord.gg/jn4EGJjrvv).
+Codemngr is a fork of T3 Code by [T3 Tools Inc.](https://github.com/pingdotgg/t3code), used under the MIT License. The upstream is tracked as the `upstream` git remote so improvements can be merged in. See [LICENSE](./LICENSE) for the original copyright.
+
+Multi-account design takes inspiration from Jean Claude by Mike Veerman, also MIT-licensed. Codemngr does not vendor Jean Claude's code; it adapts the `CLAUDE_CONFIG_DIR`-per-profile pattern within T3 Code's existing `ProviderInstance` architecture.

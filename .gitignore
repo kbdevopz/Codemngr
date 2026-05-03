@@ -22,3 +22,7 @@ apps/web/src/components/__screenshots__
 __screenshots__/
 .tanstack
 squashfs-root/
+
+# Upstream reference clones (T3 Code, Jean Claude) - kept locally for inspection, not tracked
+reference/
+
