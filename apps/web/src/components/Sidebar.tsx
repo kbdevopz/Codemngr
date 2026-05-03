@@ -2,6 +2,7 @@ import {
   ArchiveIcon,
   ArrowUpDownIcon,
   ChevronRightIcon,
+  ClockIcon,
   CloudIcon,
   FolderPlusIcon,
   SearchIcon,
@@ -163,6 +164,7 @@ import {
   ThreadStatusPill,
 } from "./Sidebar.logic";
 import { MAX_VISIBLE_SIDEBAR_THREADS_PER_PROJECT, sortThreads } from "../lib/threadSort";
+import { useComposerQueueStore } from "../composerQueueStore";
 import { SidebarUpdatePill } from "./sidebar/SidebarUpdatePill";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { CommandDialogTrigger } from "./ui/command";
@@ -323,6 +325,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const threadKey = scopedThreadKey(threadRef);
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
+  const queuedMessageCount = useComposerQueueStore(
+    (state) => state.queueByThreadKey[threadKey]?.length ?? 0,
+  );
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const hasSelection = useThreadSelectionStore((state) => state.selectedThreadKeys.size > 0);
   const runningTerminalIds = useTerminalStateStore(
@@ -595,6 +600,17 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {queuedMessageCount > 0 && (
+            <span
+              role="img"
+              aria-label={`${queuedMessageCount} queued ${queuedMessageCount === 1 ? "message" : "messages"}`}
+              title={`${queuedMessageCount} queued ${queuedMessageCount === 1 ? "message" : "messages"} — sent when the current turn ends`}
+              className="inline-flex items-center gap-0.5 text-muted-foreground"
+            >
+              <ClockIcon className="size-3" />
+              <span className="text-[10px] font-medium tabular-nums">{queuedMessageCount}</span>
+            </span>
+          )}
           {terminalStatus && (
             <span
               role="img"

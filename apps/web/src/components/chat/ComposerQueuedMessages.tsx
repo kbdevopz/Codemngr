@@ -18,6 +18,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
 }: ComposerQueuedMessagesProps) {
   const queue = useQueuedMessagesForThread(threadKey);
   const removeEntry = useComposerQueueStore((store) => store.removeEntry);
+  const clearForThread = useComposerQueueStore((store) => store.clearForThread);
 
   const handleRemove = useCallback(
     (entryId: string) => () => {
@@ -25,6 +26,10 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
     },
     [removeEntry, threadKey],
   );
+
+  const handleClearAll = useCallback(() => {
+    clearForThread(threadKey);
+  }, [clearForThread, threadKey]);
 
   if (queue.length === 0) {
     return null;
@@ -40,7 +45,18 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
     >
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
         <span>Queued ({queue.length})</span>
-        <span className="text-muted-foreground/60">— sent in order when the current turn ends</span>
+        <span className="min-w-0 flex-1 truncate text-muted-foreground/60">
+          — sent in order when the current turn ends
+        </span>
+        {queue.length > 1 && (
+          <button
+            type="button"
+            onClick={handleClearAll}
+            className="rounded text-[11px] uppercase tracking-[0.18em] text-muted-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Clear all
+          </button>
+        )}
       </div>
       <ul className="flex flex-col gap-1">
         {queue.map((entry, index) => (
