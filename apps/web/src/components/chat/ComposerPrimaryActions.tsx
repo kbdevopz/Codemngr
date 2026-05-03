@@ -107,17 +107,42 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   }
 
   if (isRunning) {
+    const showQueueButton = hasSendableContent && !showPlanFollowUpPrompt;
     return (
-      <button
-        type="button"
-        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
-        onClick={onInterrupt}
-        aria-label="Stop generation"
-      >
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
-          <rect x="2" y="2" width="8" height="8" rx="1.5" />
-        </svg>
-      </button>
+      <div className={cn("flex items-center justify-end", compact ? "gap-1" : "gap-1.5")}>
+        {showQueueButton && (
+          <button
+            type="submit"
+            className={cn(
+              "flex h-8 items-center gap-1 rounded-full border border-border bg-card text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+              compact ? "px-2.5 text-xs" : "px-3 text-sm",
+            )}
+            aria-label="Queue message"
+            title="Queue message — sent in order when the current turn ends"
+          >
+            Queue
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+              <path
+                d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+          </button>
+        )}
+        <button
+          type="button"
+          className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-rose-500/90 text-white transition-all duration-150 hover:bg-rose-500 hover:scale-105 sm:h-8 sm:w-8"
+          onClick={onInterrupt}
+          aria-label="Stop generation"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+            <rect x="2" y="2" width="8" height="8" rx="1.5" />
+          </svg>
+        </button>
+      </div>
     );
   }
 

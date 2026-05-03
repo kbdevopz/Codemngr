@@ -23,6 +23,7 @@ import {
   markPromotedDraftThreadsByRef,
   useComposerDraftStore,
 } from "~/composerDraftStore";
+import { useComposerQueueStore } from "~/composerQueueStore";
 import { ensureLocalApi } from "~/localApi";
 import { collectActiveTerminalThreadIds } from "~/lib/terminalStateCleanup";
 import { deriveOrchestrationBatchEffects } from "~/orchestrationEventEffects";
@@ -673,8 +674,10 @@ function applyRecoveredEventBatch(
   for (const threadId of batchEffects.promoteDraftThreadIds) {
     markPromotedDraftThreadByRef(scopeThreadRef(environmentId, threadId));
   }
+  const queueStore = useComposerQueueStore.getState();
   for (const threadId of batchEffects.clearDeletedThreadIds) {
     draftStore.clearDraftThread(scopeThreadRef(environmentId, threadId));
+    queueStore.clearForThread(scopedThreadKey(scopeThreadRef(environmentId, threadId)));
     useUiStateStore
       .getState()
       .clearThreadUi(scopedThreadKey(scopeThreadRef(environmentId, threadId)));
