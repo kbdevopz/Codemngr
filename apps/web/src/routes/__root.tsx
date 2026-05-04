@@ -42,6 +42,7 @@ import {
 } from "../rpc/serverState";
 import { useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
+import { useBackgroundQueueFlusher } from "../hooks/useBackgroundQueueFlusher";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import {
   ensureEnvironmentConnectionBootstrapped,
@@ -100,6 +101,7 @@ function RootRouteView() {
         <AuthenticatedTracingBootstrap />
         <ServerStateBootstrap />
         <EnvironmentConnectionManagerBootstrap />
+        <BackgroundQueueFlusherBootstrap />
         <EventRouter />
         <WebSocketConnectionCoordinator />
         <SlowRpcAckToastCoordinator />
@@ -207,6 +209,16 @@ function EnvironmentConnectionManagerBootstrap() {
     return startEnvironmentConnectionService(queryClient);
   }, [queryClient]);
 
+  return null;
+}
+
+function BackgroundQueueFlusherBootstrap() {
+  // ChatView still owns the active thread's flush; this hook handles
+  // queues on every other thread. Passing null here means the flusher
+  // attempts every queued thread; per-thread inFlight tracking + the
+  // queue store's atomic takeNext prevents double-dispatch when the
+  // active thread's flush runs in the same tick.
+  useBackgroundQueueFlusher(null);
   return null;
 }
 
