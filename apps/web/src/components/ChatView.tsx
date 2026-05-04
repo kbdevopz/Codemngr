@@ -2435,6 +2435,249 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
+  // Single dispatch helper used by both onSend (user-driven) and the queue
+  // flush effect (auto-driven). Composer state changes (clear, optimistic
+  // insert, retry-restore) live in the caller via the handlers callbacks
+  // so the dispatcher itself is composer-agnostic and can be reused for
+  // background sends in the future.
+  type DispatchPayload = {
+    text: string;
+    trimmed: string;
+    images: ComposerImageAttachment[];
+    terminalContexts: TerminalContextDraft[];
+    expiredTerminalContextCount: number;
+    selectedModelSelection: ModelSelection;
+    selectedProvider: ProviderDriverKind;
+    selectedModel: string;
+    selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
+    selectedPromptEffort: string | null;
+    runtimeMode: RuntimeMode;
+    interactionMode: ProviderInteractionMode;
+  };
+  type DispatchHandlers = {
+    onBeforeDispatch?: (info: {
+      messageIdForSend: MessageId;
+      messageCreatedAt: string;
+      outgoingMessageText: string;
+      optimisticAttachments: Array<{
+        type: "image";
+        id: string;
+        name: string;
+        mimeType: string;
+        sizeBytes: number;
+        previewUrl: string;
+      }>;
+    }) => void | Promise<void>;
+    onDispatchError?: (info: {
+      messageIdForSend: MessageId;
+      error: unknown;
+      payload: DispatchPayload;
+    }) => void | Promise<void>;
+  };
+  const dispatchUserMessage = useCallback(
+    async (payload: DispatchPayload, handlers: DispatchHandlers = {}): Promise<{ ok: boolean }> => {
+      const api = readEnvironmentApi(environmentId);
+      if (!api || !activeThread || !activeProject) {
+        return { ok: false };
+      }
+      const threadIdForSend = activeThread.id;
+      const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
+      const baseBranchForWorktree =
+        isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath
+          ? activeThreadBranch
+          : null;
+      const shouldCreateWorktree =
+        isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
+      if (shouldCreateWorktree && !activeThreadBranch) {
+        setThreadError(
+          threadIdForSend,
+          "Select a base branch before sending in New worktree mode.",
+        );
+        return { ok: false };
+      }
+
+      sendInFlightRef.current = true;
+      beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
+
+      const messageIdForSend = newMessageId();
+      const messageCreatedAt = new Date().toISOString();
+      const messageTextForSend = appendTerminalContextsToPrompt(
+        payload.text,
+        payload.terminalContexts,
+      );
+      const outgoingMessageText = formatOutgoingPrompt({
+        provider: payload.selectedProvider,
+        model: payload.selectedModel,
+        models: payload.selectedProviderModels,
+        effort: payload.selectedPromptEffort,
+        text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      });
+      const turnAttachmentsPromise = Promise.all(
+        payload.images.map(async (image) => ({
+          type: "image" as const,
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.sizeBytes,
+          dataUrl: await readFileAsDataUrl(image.file),
+        })),
+      );
+      const optimisticAttachments = payload.images.map((image) => ({
+        type: "image" as const,
+        id: image.id,
+        name: image.name,
+        mimeType: image.mimeType,
+        sizeBytes: image.sizeBytes,
+        previewUrl: image.previewUrl,
+      }));
+
+      setThreadError(threadIdForSend, null);
+
+      if (handlers.onBeforeDispatch) {
+        await handlers.onBeforeDispatch({
+          messageIdForSend,
+          messageCreatedAt,
+          outgoingMessageText,
+          optimisticAttachments,
+        });
+      }
+
+      if (payload.expiredTerminalContextCount > 0) {
+        const toastCopy = buildExpiredTerminalContextToastCopy(
+          payload.expiredTerminalContextCount,
+          "omitted",
+        );
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: toastCopy.title,
+            description: toastCopy.description,
+          }),
+        );
+      }
+
+      let turnStartSucceeded = false;
+      try {
+        const firstImageName = payload.images[0]?.name ?? null;
+        let titleSeed = payload.trimmed;
+        if (!titleSeed) {
+          if (firstImageName) {
+            titleSeed = `Image: ${firstImageName}`;
+          } else if (payload.terminalContexts.length > 0) {
+            titleSeed = formatTerminalContextLabel(payload.terminalContexts[0]!);
+          } else {
+            titleSeed = "New thread";
+          }
+        }
+        const title = truncate(titleSeed);
+        const threadCreateModelSelection = createModelSelection(
+          payload.selectedModelSelection.instanceId,
+          payload.selectedModel || activeProject.defaultModelSelection?.model || DEFAULT_MODEL,
+          payload.selectedModelSelection.options,
+        );
+
+        if (isFirstMessage && isServerThread) {
+          await api.orchestration.dispatchCommand({
+            type: "thread.meta.update",
+            commandId: newCommandId(),
+            threadId: threadIdForSend,
+            title,
+          });
+        }
+
+        if (isServerThread) {
+          await persistThreadSettingsForNextTurn({
+            threadId: threadIdForSend,
+            createdAt: messageCreatedAt,
+            ...(payload.selectedModel ? { modelSelection: payload.selectedModelSelection } : {}),
+            runtimeMode: payload.runtimeMode,
+            interactionMode: payload.interactionMode,
+          });
+        }
+
+        const turnAttachments = await turnAttachmentsPromise;
+        const bootstrap =
+          isLocalDraftThread || baseBranchForWorktree
+            ? {
+                ...(isLocalDraftThread
+                  ? {
+                      createThread: {
+                        projectId: activeProject.id,
+                        title,
+                        modelSelection: threadCreateModelSelection,
+                        runtimeMode: payload.runtimeMode,
+                        interactionMode: payload.interactionMode,
+                        branch: activeThreadBranch,
+                        worktreePath: activeThread.worktreePath,
+                        createdAt: activeThread.createdAt,
+                      },
+                    }
+                  : {}),
+                ...(baseBranchForWorktree
+                  ? {
+                      prepareWorktree: {
+                        projectCwd: activeProject.cwd,
+                        baseBranch: baseBranchForWorktree,
+                        branch: buildTemporaryWorktreeBranchName(),
+                      },
+                      runSetupScript: true,
+                    }
+                  : {}),
+              }
+            : undefined;
+        beginLocalDispatch({ preparingWorktree: false });
+        await api.orchestration.dispatchCommand({
+          type: "thread.turn.start",
+          commandId: newCommandId(),
+          threadId: threadIdForSend,
+          message: {
+            messageId: messageIdForSend,
+            role: "user",
+            text: outgoingMessageText,
+            attachments: turnAttachments,
+          },
+          modelSelection: payload.selectedModelSelection,
+          titleSeed: title,
+          runtimeMode: payload.runtimeMode,
+          interactionMode: payload.interactionMode,
+          ...(bootstrap ? { bootstrap } : {}),
+          createdAt: messageCreatedAt,
+        });
+        turnStartSucceeded = true;
+      } catch (err) {
+        setThreadError(
+          threadIdForSend,
+          err instanceof Error ? err.message : "Failed to send message.",
+        );
+        if (handlers.onDispatchError) {
+          await handlers.onDispatchError({
+            messageIdForSend,
+            error: err,
+            payload,
+          });
+        }
+      }
+
+      sendInFlightRef.current = false;
+      if (!turnStartSucceeded) {
+        resetLocalDispatch();
+      }
+      return { ok: turnStartSucceeded };
+    },
+    [
+      activeProject,
+      activeThread,
+      activeThreadBranch,
+      beginLocalDispatch,
+      environmentId,
+      isLocalDraftThread,
+      isServerThread,
+      persistThreadSettingsForNextTurn,
+      resetLocalDispatch,
+      sendEnvMode,
+      setThreadError,
+    ],
+  );
+
   const onSend = async (e?: { preventDefault: () => void }) => {
     e?.preventDefault();
     const api = readEnvironmentApi(environmentId);
@@ -2561,236 +2804,92 @@ export default function ChatView(props: ChatViewProps) {
       return;
     }
     if (!activeProject) return;
-    const threadIdForSend = activeThread.id;
-    const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
-    const baseBranchForWorktree =
-      isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath
-        ? activeThreadBranch
-        : null;
 
-    // In worktree mode, require an explicit base branch so we don't silently
-    // fall back to local execution when branch selection is missing.
-    const shouldCreateWorktree =
-      isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
-    if (shouldCreateWorktree && !activeThreadBranch) {
-      setThreadError(threadIdForSend, "Select a base branch before sending in New worktree mode.");
-      return;
-    }
-
-    sendInFlightRef.current = true;
-    beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
-
+    // Snapshot composer content before clearing so retry-on-error can restore it.
     const composerImagesSnapshot = [...composerImages];
     const composerTerminalContextsSnapshot = [...sendableComposerTerminalContexts];
-    const messageTextForSend = appendTerminalContextsToPrompt(
-      promptForSend,
-      composerTerminalContextsSnapshot,
-    );
-    const messageIdForSend = newMessageId();
-    const messageCreatedAt = new Date().toISOString();
-    const outgoingMessageText = formatOutgoingPrompt({
-      provider: ctxSelectedProvider,
-      model: ctxSelectedModel,
-      models: ctxSelectedProviderModels,
-      effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
-    });
-    const turnAttachmentsPromise = Promise.all(
-      composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
-        name: image.name,
-        mimeType: image.mimeType,
-        sizeBytes: image.sizeBytes,
-        dataUrl: await readFileAsDataUrl(image.file),
-      })),
-    );
-    const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
-      id: image.id,
-      name: image.name,
-      mimeType: image.mimeType,
-      sizeBytes: image.sizeBytes,
-      previewUrl: image.previewUrl,
-    }));
-    // Pre-send scroll lets LegendList's maintainScrollAtEnd pin to the new
-    // item; the rAF after the optimistic insert handles users scrolled
-    // beyond maintainScrollAtEndThreshold where the pin would otherwise miss.
-    await pinTimelineToBottomBeforeSend();
 
-    setOptimisticUserMessages((existing) => [
-      ...existing,
-      {
-        id: messageIdForSend,
-        role: "user",
-        text: outgoingMessageText,
-        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-        createdAt: messageCreatedAt,
-        streaming: false,
-      },
-    ]);
-    scrollToEndOnNextFrame();
-
-    setThreadError(threadIdForSend, null);
-    if (expiredTerminalContextCount > 0) {
-      const toastCopy = buildExpiredTerminalContextToastCopy(
-        expiredTerminalContextCount,
-        "omitted",
-      );
-      toastManager.add(
-        stackedThreadToast({
-          type: "warning",
-          title: toastCopy.title,
-          description: toastCopy.description,
-        }),
-      );
-    }
     promptRef.current = "";
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
 
-    let turnStartSucceeded = false;
-    await (async () => {
-      let firstComposerImageName: string | null = null;
-      if (composerImagesSnapshot.length > 0) {
-        const firstComposerImage = composerImagesSnapshot[0];
-        if (firstComposerImage) {
-          firstComposerImageName = firstComposerImage.name;
-        }
-      }
-      let titleSeed = trimmed;
-      if (!titleSeed) {
-        if (firstComposerImageName) {
-          titleSeed = `Image: ${firstComposerImageName}`;
-        } else if (composerTerminalContextsSnapshot.length > 0) {
-          titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
-        } else {
-          titleSeed = "New thread";
-        }
-      }
-      const title = truncate(titleSeed);
-      const threadCreateModelSelection = createModelSelection(
-        ctxSelectedModelSelection.instanceId,
-        ctxSelectedModel || activeProject.defaultModelSelection?.model || DEFAULT_MODEL,
-        ctxSelectedModelSelection.options,
-      );
-
-      // Auto-title from first message
-      if (isFirstMessage && isServerThread) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          title,
-        });
-      }
-
-      if (isServerThread) {
-        await persistThreadSettingsForNextTurn({
-          threadId: threadIdForSend,
-          createdAt: messageCreatedAt,
-          ...(ctxSelectedModel ? { modelSelection: ctxSelectedModelSelection } : {}),
-          runtimeMode,
-          interactionMode,
-        });
-      }
-
-      const turnAttachments = await turnAttachmentsPromise;
-      const bootstrap =
-        isLocalDraftThread || baseBranchForWorktree
-          ? {
-              ...(isLocalDraftThread
-                ? {
-                    createThread: {
-                      projectId: activeProject.id,
-                      title,
-                      modelSelection: threadCreateModelSelection,
-                      runtimeMode,
-                      interactionMode,
-                      branch: activeThreadBranch,
-                      worktreePath: activeThread.worktreePath,
-                      createdAt: activeThread.createdAt,
-                    },
-                  }
-                : {}),
-              ...(baseBranchForWorktree
-                ? {
-                    prepareWorktree: {
-                      projectCwd: activeProject.cwd,
-                      baseBranch: baseBranchForWorktree,
-                      branch: buildTemporaryWorktreeBranchName(),
-                    },
-                    runSetupScript: true,
-                  }
-                : {}),
-            }
-          : undefined;
-      beginLocalDispatch({ preparingWorktree: false });
-      await api.orchestration.dispatchCommand({
-        type: "thread.turn.start",
-        commandId: newCommandId(),
-        threadId: threadIdForSend,
-        message: {
-          messageId: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          attachments: turnAttachments,
-        },
-        modelSelection: ctxSelectedModelSelection,
-        titleSeed: title,
+    await dispatchUserMessage(
+      {
+        text: promptForSend,
+        trimmed,
+        images: composerImagesSnapshot,
+        terminalContexts: composerTerminalContextsSnapshot,
+        expiredTerminalContextCount,
+        selectedModelSelection: ctxSelectedModelSelection,
+        selectedProvider: ctxSelectedProvider,
+        selectedModel: ctxSelectedModel,
+        selectedProviderModels: ctxSelectedProviderModels,
+        selectedPromptEffort: ctxSelectedPromptEffort,
         runtimeMode,
         interactionMode,
-        ...(bootstrap ? { bootstrap } : {}),
-        createdAt: messageCreatedAt,
-      });
-      turnStartSucceeded = true;
-    })().catch(async (err: unknown) => {
-      if (
-        !turnStartSucceeded &&
-        promptRef.current.length === 0 &&
-        composerImagesRef.current.length === 0 &&
-        composerTerminalContextsRef.current.length === 0
-      ) {
-        setOptimisticUserMessages((existing) => {
-          const removed = existing.filter((message) => message.id === messageIdForSend);
-          for (const message of removed) {
-            revokeUserMessagePreviewUrls(message);
+      },
+      {
+        async onBeforeDispatch({
+          messageIdForSend,
+          messageCreatedAt,
+          outgoingMessageText,
+          optimisticAttachments,
+        }) {
+          await pinTimelineToBottomBeforeSend();
+          setOptimisticUserMessages((existing) => [
+            ...existing,
+            {
+              id: messageIdForSend,
+              role: "user",
+              text: outgoingMessageText,
+              ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+              createdAt: messageCreatedAt,
+              streaming: false,
+            },
+          ]);
+          scrollToEndOnNextFrame();
+        },
+        onDispatchError({ messageIdForSend, payload }) {
+          if (
+            promptRef.current.length === 0 &&
+            composerImagesRef.current.length === 0 &&
+            composerTerminalContextsRef.current.length === 0
+          ) {
+            setOptimisticUserMessages((existing) => {
+              const removed = existing.filter((message) => message.id === messageIdForSend);
+              for (const message of removed) {
+                revokeUserMessagePreviewUrls(message);
+              }
+              const next = existing.filter((message) => message.id !== messageIdForSend);
+              return next.length === existing.length ? existing : next;
+            });
+            promptRef.current = payload.text;
+            const retryComposerImages = payload.images.map(cloneComposerImageForRetry);
+            composerImagesRef.current = retryComposerImages;
+            composerTerminalContextsRef.current = [...payload.terminalContexts];
+            setComposerDraftPrompt(composerDraftTarget, payload.text);
+            addComposerDraftImages(composerDraftTarget, retryComposerImages);
+            setComposerDraftTerminalContexts(composerDraftTarget, [...payload.terminalContexts]);
+            composerRef.current?.resetCursorState({
+              cursor: collapseExpandedComposerCursor(payload.text, payload.text.length),
+              prompt: payload.text,
+              detectTrigger: true,
+            });
           }
-          const next = existing.filter((message) => message.id !== messageIdForSend);
-          return next.length === existing.length ? existing : next;
-        });
-        promptRef.current = promptForSend;
-        const retryComposerImages = composerImagesSnapshot.map(cloneComposerImageForRetry);
-        composerImagesRef.current = retryComposerImages;
-        composerTerminalContextsRef.current = composerTerminalContextsSnapshot;
-        setComposerDraftPrompt(composerDraftTarget, promptForSend);
-        addComposerDraftImages(composerDraftTarget, retryComposerImages);
-        setComposerDraftTerminalContexts(composerDraftTarget, composerTerminalContextsSnapshot);
-        composerRef.current?.resetCursorState({
-          cursor: collapseExpandedComposerCursor(promptForSend, promptForSend.length),
-          prompt: promptForSend,
-          detectTrigger: true,
-        });
-      }
-      setThreadError(
-        threadIdForSend,
-        err instanceof Error ? err.message : "Failed to send message.",
-      );
-    });
-    sendInFlightRef.current = false;
-    if (!turnStartSucceeded) {
-      resetLocalDispatch();
-    }
+        },
+      },
+    );
   };
 
   onSendRef.current = onSend;
 
-  // Flush the next queued message once the active turn has settled. Done one
-  // at a time so the dispatch path stays the same as a manual submit; if a
-  // dispatch fails or starts a new turn, the next flush waits until that
-  // turn also settles. We restore the queued snapshot back into composer
-  // state (prompt + images + terminal contexts) using the same setters
-  // the retry-on-error path uses, then trigger onSend on a microtask so
-  // the draft-store updates have committed before onSend reads them.
+  // Flush the next queued message once the active turn has settled. The
+  // dispatcher takes the snapshot directly so we no longer write the
+  // queued content back into composer state — the user's current draft
+  // is left untouched. One entry per latestTurnSettled transition; the
+  // next flush waits for the new turn (started by this dispatch) to
+  // settle. The microtask delay lets in-flight setState updates commit
+  // before we read store-derived values for the dispatch.
   useEffect(() => {
     if (!queueHeadId) return;
     if (!latestTurnSettled) return;
@@ -2798,32 +2897,35 @@ export default function ChatView(props: ChatViewProps) {
     if (phase === "running") return;
     const taken = takeNextQueuedMessage(routeThreadKey);
     if (!taken) return;
-    const hydratedImages = taken.images ? hydrateImagesFromPersisted(taken.images) : [];
-    const queuedTerminalContexts = taken.terminalContexts ?? [];
-    promptRef.current = taken.text;
-    composerImagesRef.current = hydratedImages;
-    composerTerminalContextsRef.current = [...queuedTerminalContexts];
-    if (taken.modelSelection) {
-      setComposerDraftModelSelection(composerDraftTarget, taken.modelSelection);
-    }
-    if (taken.runtimeMode) {
-      setComposerDraftRuntimeMode(composerDraftTarget, taken.runtimeMode);
-    }
-    if (taken.interactionMode) {
-      setComposerDraftInteractionMode(composerDraftTarget, taken.interactionMode);
-    }
-    setComposerDraftPrompt(composerDraftTarget, taken.text);
-    if (hydratedImages.length > 0) {
-      addComposerDraftImages(composerDraftTarget, hydratedImages);
-    }
-    setComposerDraftTerminalContexts(composerDraftTarget, [...queuedTerminalContexts]);
-    composerRef.current?.resetCursorState({
-      cursor: collapseExpandedComposerCursor(taken.text, taken.text.length),
-      prompt: taken.text,
-      detectTrigger: false,
-    });
-    void Promise.resolve().then(() => {
-      void onSendRef.current?.();
+    void Promise.resolve().then(async () => {
+      const hydratedImages = taken.images ? hydrateImagesFromPersisted(taken.images) : [];
+      const queuedTerminalContexts = [...(taken.terminalContexts ?? [])];
+      const sendCtx = composerRef.current?.getSendContext();
+      const fallbackModelSelection =
+        sendCtx?.selectedModelSelection ?? activeThread?.modelSelection;
+      const modelSelection = taken.modelSelection ?? fallbackModelSelection;
+      if (!modelSelection) return;
+      const providerInstanceId = modelSelection.instanceId;
+      const providerEntry =
+        providerStatuses.find((entry) => entry.instanceId === providerInstanceId) ?? null;
+      const providerKind = providerEntry?.driver ?? sendCtx?.selectedProvider ?? null;
+      if (!providerKind) return;
+      const providerModelsForDispatch =
+        providerEntry?.models ?? sendCtx?.selectedProviderModels ?? [];
+      await dispatchUserMessage({
+        text: taken.text,
+        trimmed: taken.text,
+        images: hydratedImages,
+        terminalContexts: queuedTerminalContexts,
+        expiredTerminalContextCount: 0,
+        selectedModelSelection: modelSelection,
+        selectedProvider: providerKind,
+        selectedModel: modelSelection.model ?? "",
+        selectedProviderModels: providerModelsForDispatch,
+        selectedPromptEffort: sendCtx?.selectedPromptEffort ?? null,
+        runtimeMode: taken.runtimeMode ?? runtimeMode,
+        interactionMode: taken.interactionMode ?? interactionMode,
+      });
     });
   }, [
     queueHeadId,
@@ -2832,14 +2934,12 @@ export default function ChatView(props: ChatViewProps) {
     isConnecting,
     phase,
     routeThreadKey,
-    composerDraftTarget,
-    setComposerDraftPrompt,
-    addComposerDraftImages,
-    setComposerDraftTerminalContexts,
-    setComposerDraftModelSelection,
-    setComposerDraftRuntimeMode,
-    setComposerDraftInteractionMode,
     takeNextQueuedMessage,
+    dispatchUserMessage,
+    activeThread?.modelSelection,
+    providerStatuses,
+    runtimeMode,
+    interactionMode,
   ]);
 
   const onInterrupt = async () => {
