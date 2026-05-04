@@ -27,11 +27,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime";
-import {
-  applyClaudePromptEffortPrefix,
-  createModelSelection,
-  resolvePromptInjectedEffort,
-} from "@t3tools/shared/model";
+import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@t3tools/shared/model";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { Debouncer } from "@tanstack/react-pacer";
@@ -97,7 +93,6 @@ import {
 import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useCommandPaletteStore } from "../commandPaletteStore";
-import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { BranchToolbar } from "./BranchToolbar";
@@ -139,13 +134,16 @@ import {
   useQueueHeadIdForThread,
 } from "../composerQueueStore";
 import {
-  appendTerminalContextsToPrompt,
-  formatTerminalContextLabel,
   isTerminalContextExpired,
   type TerminalContextDraft,
   type TerminalContextSelection,
 } from "../lib/terminalContext";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import {
+  dispatchUserMessage,
+  type DispatchHandlers,
+  type DispatchPayload,
+} from "../lib/dispatchUserMessage";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { ComposerQueuedMessages } from "./chat/ComposerQueuedMessages";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -190,8 +188,6 @@ import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 import { RightPanelSheet } from "./RightPanelSheet";
 
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROPOSED_PLANS: Thread["proposedPlans"] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
@@ -2435,246 +2431,45 @@ export default function ChatView(props: ChatViewProps) {
     ],
   );
 
-  // Single dispatch helper used by both onSend (user-driven) and the queue
-  // flush effect (auto-driven). Composer state changes (clear, optimistic
-  // insert, retry-restore) live in the caller via the handlers callbacks
-  // so the dispatcher itself is composer-agnostic and can be reused for
-  // background sends in the future.
-  type DispatchPayload = {
-    text: string;
-    trimmed: string;
-    images: ComposerImageAttachment[];
-    terminalContexts: TerminalContextDraft[];
-    expiredTerminalContextCount: number;
-    selectedModelSelection: ModelSelection;
-    selectedProvider: ProviderDriverKind;
-    selectedModel: string;
-    selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
-    selectedPromptEffort: string | null;
-    runtimeMode: RuntimeMode;
-    interactionMode: ProviderInteractionMode;
-  };
-  type DispatchHandlers = {
-    onBeforeDispatch?: (info: {
-      messageIdForSend: MessageId;
-      messageCreatedAt: string;
-      outgoingMessageText: string;
-      optimisticAttachments: Array<{
-        type: "image";
-        id: string;
-        name: string;
-        mimeType: string;
-        sizeBytes: number;
-        previewUrl: string;
-      }>;
-    }) => void | Promise<void>;
-    onDispatchError?: (info: {
-      messageIdForSend: MessageId;
-      error: unknown;
-      payload: DispatchPayload;
-    }) => void | Promise<void>;
-  };
-  const dispatchUserMessage = useCallback(
-    async (payload: DispatchPayload, handlers: DispatchHandlers = {}): Promise<{ ok: boolean }> => {
-      const api = readEnvironmentApi(environmentId);
-      if (!api || !activeThread || !activeProject) {
-        return { ok: false };
-      }
-      const threadIdForSend = activeThread.id;
-      const isFirstMessage = !isServerThread || activeThread.messages.length === 0;
-      const baseBranchForWorktree =
-        isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath
-          ? activeThreadBranch
-          : null;
-      const shouldCreateWorktree =
-        isFirstMessage && sendEnvMode === "worktree" && !activeThread.worktreePath;
-      if (shouldCreateWorktree && !activeThreadBranch) {
-        setThreadError(
-          threadIdForSend,
-          "Select a base branch before sending in New worktree mode.",
-        );
-        return { ok: false };
-      }
-
-      sendInFlightRef.current = true;
-      beginLocalDispatch({ preparingWorktree: Boolean(baseBranchForWorktree) });
-
-      const messageIdForSend = newMessageId();
-      const messageCreatedAt = new Date().toISOString();
-      const messageTextForSend = appendTerminalContextsToPrompt(
-        payload.text,
-        payload.terminalContexts,
-      );
-      const outgoingMessageText = formatOutgoingPrompt({
-        provider: payload.selectedProvider,
-        model: payload.selectedModel,
-        models: payload.selectedProviderModels,
-        effort: payload.selectedPromptEffort,
-        text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
-      });
-      const turnAttachmentsPromise = Promise.all(
-        payload.images.map(async (image) => ({
-          type: "image" as const,
-          name: image.name,
-          mimeType: image.mimeType,
-          sizeBytes: image.sizeBytes,
-          dataUrl: await readFileAsDataUrl(image.file),
-        })),
-      );
-      const optimisticAttachments = payload.images.map((image) => ({
-        type: "image" as const,
-        id: image.id,
-        name: image.name,
-        mimeType: image.mimeType,
-        sizeBytes: image.sizeBytes,
-        previewUrl: image.previewUrl,
-      }));
-
-      setThreadError(threadIdForSend, null);
-
-      if (handlers.onBeforeDispatch) {
-        await handlers.onBeforeDispatch({
-          messageIdForSend,
-          messageCreatedAt,
-          outgoingMessageText,
-          optimisticAttachments,
-        });
-      }
-
-      if (payload.expiredTerminalContextCount > 0) {
-        const toastCopy = buildExpiredTerminalContextToastCopy(
-          payload.expiredTerminalContextCount,
-          "omitted",
-        );
-        toastManager.add(
-          stackedThreadToast({
-            type: "warning",
-            title: toastCopy.title,
-            description: toastCopy.description,
-          }),
-        );
-      }
-
-      let turnStartSucceeded = false;
-      try {
-        const firstImageName = payload.images[0]?.name ?? null;
-        let titleSeed = payload.trimmed;
-        if (!titleSeed) {
-          if (firstImageName) {
-            titleSeed = `Image: ${firstImageName}`;
-          } else if (payload.terminalContexts.length > 0) {
-            titleSeed = formatTerminalContextLabel(payload.terminalContexts[0]!);
-          } else {
-            titleSeed = "New thread";
-          }
-        }
-        const title = truncate(titleSeed);
-        const threadCreateModelSelection = createModelSelection(
-          payload.selectedModelSelection.instanceId,
-          payload.selectedModel || activeProject.defaultModelSelection?.model || DEFAULT_MODEL,
-          payload.selectedModelSelection.options,
-        );
-
-        if (isFirstMessage && isServerThread) {
-          await api.orchestration.dispatchCommand({
-            type: "thread.meta.update",
-            commandId: newCommandId(),
-            threadId: threadIdForSend,
-            title,
-          });
-        }
-
-        if (isServerThread) {
-          await persistThreadSettingsForNextTurn({
-            threadId: threadIdForSend,
-            createdAt: messageCreatedAt,
-            ...(payload.selectedModel ? { modelSelection: payload.selectedModelSelection } : {}),
-            runtimeMode: payload.runtimeMode,
-            interactionMode: payload.interactionMode,
-          });
-        }
-
-        const turnAttachments = await turnAttachmentsPromise;
-        const bootstrap =
-          isLocalDraftThread || baseBranchForWorktree
-            ? {
-                ...(isLocalDraftThread
-                  ? {
-                      createThread: {
-                        projectId: activeProject.id,
-                        title,
-                        modelSelection: threadCreateModelSelection,
-                        runtimeMode: payload.runtimeMode,
-                        interactionMode: payload.interactionMode,
-                        branch: activeThreadBranch,
-                        worktreePath: activeThread.worktreePath,
-                        createdAt: activeThread.createdAt,
-                      },
-                    }
-                  : {}),
-                ...(baseBranchForWorktree
-                  ? {
-                      prepareWorktree: {
-                        projectCwd: activeProject.cwd,
-                        baseBranch: baseBranchForWorktree,
-                        branch: buildTemporaryWorktreeBranchName(),
-                      },
-                      runSetupScript: true,
-                    }
-                  : {}),
-              }
-            : undefined;
-        beginLocalDispatch({ preparingWorktree: false });
-        await api.orchestration.dispatchCommand({
-          type: "thread.turn.start",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            attachments: turnAttachments,
+  // Wrap the module-level dispatchUserMessage with this thread's component
+  // state plumbing (sendInFlightRef, beginLocalDispatch, resetLocalDispatch).
+  // Component-local UI side effects (optimistic insert, scroll, retry restore)
+  // are passed in by the caller via the handlers argument. Background queue
+  // flushers in other components reuse the same module-level function.
+  const dispatchActiveThreadMessage = useCallback(
+    async (
+      payload: Omit<
+        DispatchPayload,
+        "threadRef" | "isLocalDraftThread" | "sendEnvMode" | "activeThreadBranch"
+      >,
+      handlers: DispatchHandlers = {},
+    ): Promise<{ ok: boolean }> => {
+      if (!activeThread) return { ok: false };
+      return dispatchUserMessage(
+        {
+          ...payload,
+          threadRef: scopeThreadRef(activeThread.environmentId, activeThread.id),
+          isLocalDraftThread,
+          sendEnvMode,
+          activeThreadBranch,
+        },
+        {
+          ...handlers,
+          beginLocalDispatch,
+          resetLocalDispatch,
+          markSendInFlight: (inFlight) => {
+            sendInFlightRef.current = inFlight;
           },
-          modelSelection: payload.selectedModelSelection,
-          titleSeed: title,
-          runtimeMode: payload.runtimeMode,
-          interactionMode: payload.interactionMode,
-          ...(bootstrap ? { bootstrap } : {}),
-          createdAt: messageCreatedAt,
-        });
-        turnStartSucceeded = true;
-      } catch (err) {
-        setThreadError(
-          threadIdForSend,
-          err instanceof Error ? err.message : "Failed to send message.",
-        );
-        if (handlers.onDispatchError) {
-          await handlers.onDispatchError({
-            messageIdForSend,
-            error: err,
-            payload,
-          });
-        }
-      }
-
-      sendInFlightRef.current = false;
-      if (!turnStartSucceeded) {
-        resetLocalDispatch();
-      }
-      return { ok: turnStartSucceeded };
+        },
+      );
     },
     [
-      activeProject,
       activeThread,
       activeThreadBranch,
       beginLocalDispatch,
-      environmentId,
       isLocalDraftThread,
-      isServerThread,
-      persistThreadSettingsForNextTurn,
       resetLocalDispatch,
       sendEnvMode,
-      setThreadError,
     ],
   );
 
@@ -2813,7 +2608,7 @@ export default function ChatView(props: ChatViewProps) {
     clearComposerDraftContent(composerDraftTarget);
     composerRef.current?.resetCursorState();
 
-    await dispatchUserMessage(
+    await dispatchActiveThreadMessage(
       {
         text: promptForSend,
         trimmed,
@@ -2912,7 +2707,7 @@ export default function ChatView(props: ChatViewProps) {
       if (!providerKind) return;
       const providerModelsForDispatch =
         providerEntry?.models ?? sendCtx?.selectedProviderModels ?? [];
-      await dispatchUserMessage({
+      await dispatchActiveThreadMessage({
         text: taken.text,
         trimmed: taken.text,
         images: hydratedImages,
@@ -2935,7 +2730,7 @@ export default function ChatView(props: ChatViewProps) {
     phase,
     routeThreadKey,
     takeNextQueuedMessage,
-    dispatchUserMessage,
+    dispatchActiveThreadMessage,
     activeThread?.modelSelection,
     providerStatuses,
     runtimeMode,
