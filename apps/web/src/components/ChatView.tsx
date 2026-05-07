@@ -1983,7 +1983,8 @@ export default function ChatView(props: ChatViewProps) {
   // refuses sends with attachments / terminal contexts during a turn,
   // since queueing those requires a snapshot-driven dispatch refactor.
   const enqueueComposerMessage = useComposerQueueStore((store) => store.enqueue);
-  const takeNextQueuedMessage = useComposerQueueStore((store) => store.takeNext);
+  const beginQueuedDispatch = useComposerQueueStore((store) => store.beginInFlight);
+  const completeQueuedDispatch = useComposerQueueStore((store) => store.completeInFlight);
   const removeQueuedMessage = useComposerQueueStore((store) => store.removeEntry);
   const queueHeadId = useQueueHeadIdForThread(routeThreadKey);
   const onSendRef = useRef<((e?: { preventDefault: () => void }) => Promise<void>) | null>(null);
@@ -2655,7 +2656,7 @@ export default function ChatView(props: ChatViewProps) {
     if (!latestTurnSettled) return;
     if (isSendBusy || isConnecting || sendInFlightRef.current) return;
     if (phase === "running") return;
-    const taken = takeNextQueuedMessage(routeThreadKey);
+    const taken = beginQueuedDispatch(routeThreadKey);
     if (!taken) return;
     void Promise.resolve().then(async () => {
       const hydratedImages = taken.images ? hydrateImagesFromPersisted(taken.images) : [];
@@ -2664,15 +2665,21 @@ export default function ChatView(props: ChatViewProps) {
       const fallbackModelSelection =
         sendCtx?.selectedModelSelection ?? activeThread?.modelSelection;
       const modelSelection = taken.modelSelection ?? fallbackModelSelection;
-      if (!modelSelection) return;
+      if (!modelSelection) {
+        completeQueuedDispatch(routeThreadKey, false);
+        return;
+      }
       const providerInstanceId = modelSelection.instanceId;
       const providerEntry =
         providerStatuses.find((entry) => entry.instanceId === providerInstanceId) ?? null;
       const providerKind = providerEntry?.driver ?? sendCtx?.selectedProvider ?? null;
-      if (!providerKind) return;
+      if (!providerKind) {
+        completeQueuedDispatch(routeThreadKey, false);
+        return;
+      }
       const providerModelsForDispatch =
         providerEntry?.models ?? sendCtx?.selectedProviderModels ?? [];
-      await dispatchActiveThreadMessage({
+      const result = await dispatchActiveThreadMessage({
         text: taken.text,
         trimmed: taken.text,
         images: hydratedImages,
@@ -2686,6 +2693,7 @@ export default function ChatView(props: ChatViewProps) {
         runtimeMode: taken.runtimeMode ?? runtimeMode,
         interactionMode: taken.interactionMode ?? interactionMode,
       });
+      completeQueuedDispatch(routeThreadKey, result.ok);
     });
   }, [
     queueHeadId,
@@ -2694,7 +2702,8 @@ export default function ChatView(props: ChatViewProps) {
     isConnecting,
     phase,
     routeThreadKey,
-    takeNextQueuedMessage,
+    beginQueuedDispatch,
+    completeQueuedDispatch,
     dispatchActiveThreadMessage,
     activeThread?.modelSelection,
     providerStatuses,

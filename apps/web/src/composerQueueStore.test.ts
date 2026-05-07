@@ -19,7 +19,7 @@ function makeEntry(text: string) {
 
 describe("composerQueueStore", () => {
   afterEach(() => {
-    useComposerQueueStore.setState({ queueByThreadKey: {} });
+    useComposerQueueStore.setState({ queueByThreadKey: {}, inFlightByThreadKey: {} });
   });
 
   it("appends entries in submission order per thread", () => {
@@ -58,19 +58,54 @@ describe("composerQueueStore", () => {
     expect(queue?.map((entry) => entry.id)).toEqual([keep.id]);
   });
 
-  it("takeNext pops the head and returns it", () => {
+  it("beginInFlight moves the head into the in-flight slot", () => {
     const first = makeEntry("first");
     const second = makeEntry("second");
-    const { enqueue, takeNext } = useComposerQueueStore.getState();
+    const { enqueue, beginInFlight } = useComposerQueueStore.getState();
     enqueue(THREAD_A, first);
     enqueue(THREAD_A, second);
-    expect(takeNext(THREAD_A)?.id).toBe(first.id);
-    const queue = useComposerQueueStore.getState().queueByThreadKey[THREAD_A];
-    expect(queue?.map((entry) => entry.id)).toEqual([second.id]);
+    expect(beginInFlight(THREAD_A)?.id).toBe(first.id);
+    const state = useComposerQueueStore.getState();
+    expect(state.queueByThreadKey[THREAD_A]?.map((entry) => entry.id)).toEqual([second.id]);
+    expect(state.inFlightByThreadKey[THREAD_A]?.id).toBe(first.id);
   });
 
-  it("takeNext returns null and is a no-op for empty queues", () => {
-    expect(useComposerQueueStore.getState().takeNext(THREAD_A)).toBeNull();
+  it("beginInFlight returns null when the slot is already occupied", () => {
+    const first = makeEntry("first");
+    const second = makeEntry("second");
+    const { enqueue, beginInFlight } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, first);
+    enqueue(THREAD_A, second);
+    expect(beginInFlight(THREAD_A)?.id).toBe(first.id);
+    expect(beginInFlight(THREAD_A)).toBeNull();
+  });
+
+  it("beginInFlight returns null and is a no-op for empty queues", () => {
+    expect(useComposerQueueStore.getState().beginInFlight(THREAD_A)).toBeNull();
+  });
+
+  it("completeInFlight on success drops the in-flight entry", () => {
+    const entry = makeEntry("only");
+    const { enqueue, beginInFlight, completeInFlight } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, entry);
+    beginInFlight(THREAD_A);
+    completeInFlight(THREAD_A, true);
+    const state = useComposerQueueStore.getState();
+    expect(state.inFlightByThreadKey[THREAD_A]).toBeUndefined();
+    expect(state.queueByThreadKey[THREAD_A]).toBeUndefined();
+  });
+
+  it("completeInFlight on failure prepends the entry back to the queue", () => {
+    const head = makeEntry("head");
+    const tail = makeEntry("tail");
+    const { enqueue, beginInFlight, completeInFlight } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, head);
+    enqueue(THREAD_A, tail);
+    beginInFlight(THREAD_A);
+    completeInFlight(THREAD_A, false);
+    const state = useComposerQueueStore.getState();
+    expect(state.inFlightByThreadKey[THREAD_A]).toBeUndefined();
+    expect(state.queueByThreadKey[THREAD_A]?.map((entry) => entry.id)).toEqual([head.id, tail.id]);
   });
 
   it("clearForThread removes the thread's queue but preserves others", () => {

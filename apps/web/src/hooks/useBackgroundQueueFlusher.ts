@@ -49,7 +49,7 @@ export function useBackgroundQueueFlusher(activeThreadKey: string | null) {
       );
       if (!providerEntry) continue;
 
-      const taken = useComposerQueueStore.getState().takeNext(threadKey);
+      const taken = useComposerQueueStore.getState().beginInFlight(threadKey);
       if (!taken) continue;
       inFlightRef.current.add(threadKey);
 
@@ -72,11 +72,16 @@ export function useBackgroundQueueFlusher(activeThreadKey: string | null) {
         runtimeMode: taken.runtimeMode ?? thread.runtimeMode,
         interactionMode: taken.interactionMode ?? thread.interactionMode,
       })
+        .then((result) => {
+          // On success, drop the in-flight entry. On failure (network
+          // glitch, server error) keep the entry queued so the user can
+          // see it and either retry by navigating to the thread or
+          // remove it manually. Persistent failures still set thread
+          // error inside dispatchUserMessage so the user gets feedback.
+          useComposerQueueStore.getState().completeInFlight(threadKey, result.ok);
+        })
         .catch(() => {
-          // setThreadError is called inside dispatchUserMessage so the
-          // user sees the failure on that thread next time they visit.
-          // We drop the entry rather than re-queueing to avoid a retry
-          // loop on persistent failures.
+          useComposerQueueStore.getState().completeInFlight(threadKey, false);
         })
         .finally(() => {
           inFlightRef.current.delete(threadKey);

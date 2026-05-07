@@ -67,9 +67,29 @@ export type EnqueueResult = { ok: true } | { ok: false; reason: "queue-full" | "
 
 export interface ComposerQueueStoreState {
   queueByThreadKey: Record<string, ReadonlyArray<QueuedMessageEntry>>;
+  /**
+   * Per-thread "currently dispatching" slot. The entry has been popped
+   * from queueByThreadKey and an API call is in flight. Persisted so a
+   * reload mid-dispatch puts the entry back in the queue rather than
+   * losing it. completeInFlight clears this on success, or moves the
+   * entry back to the queue head on failure.
+   */
+  inFlightByThreadKey: Record<string, QueuedMessageEntry>;
   enqueue: (threadKey: string, entry: QueuedMessageEntry) => EnqueueResult;
   removeEntry: (threadKey: string, entryId: string) => void;
-  takeNext: (threadKey: string) => QueuedMessageEntry | null;
+  /**
+   * Atomically pops the head off the queue and stores it in the in-flight
+   * slot. Returns null if the queue is empty or the in-flight slot for
+   * that thread is already occupied. The caller MUST eventually call
+   * completeInFlight for that thread to release the slot.
+   */
+  beginInFlight: (threadKey: string) => QueuedMessageEntry | null;
+  /**
+   * Called when the dispatch finishes. On success, drops the in-flight
+   * entry. On failure, prepends it back to the queue so it gets retried
+   * on the next settle (or by the user).
+   */
+  completeInFlight: (threadKey: string, success: boolean) => void;
   clearForThread: (threadKey: string) => void;
   reorder: (threadKey: string, fromIndex: number, toIndex: number) => void;
 }
@@ -93,6 +113,7 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
   persist(
     (set, get) => ({
       queueByThreadKey: {},
+      inFlightByThreadKey: {},
       enqueue: (threadKey, entry) => {
         if (approximateEntryBytes(entry) > COMPOSER_QUEUE_MAX_ENTRY_BYTES) {
           return { ok: false, reason: "entry-too-large" };
@@ -124,27 +145,51 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
           return { queueByThreadKey: { ...rest, [threadKey]: next } };
         });
       },
-      takeNext: (threadKey) => {
-        const existing = get().queueByThreadKey[threadKey];
+      beginInFlight: (threadKey) => {
+        const state = get();
+        if (state.inFlightByThreadKey[threadKey]) return null;
+        const existing = state.queueByThreadKey[threadKey];
         const head = existing?.[0] ?? null;
         if (!head) return null;
-        set((state) => {
-          const current = state.queueByThreadKey[threadKey];
-          if (!current || current.length === 0) return state;
-          const [, ...rest] = current;
-          const { [threadKey]: _removed, ...others } = state.queueByThreadKey;
-          if (rest.length === 0) {
-            return { queueByThreadKey: others };
-          }
-          return { queueByThreadKey: { ...others, [threadKey]: rest } };
+        set((current) => {
+          const queue = current.queueByThreadKey[threadKey];
+          if (!queue || queue.length === 0) return current;
+          const [, ...rest] = queue;
+          const { [threadKey]: _removed, ...others } = current.queueByThreadKey;
+          const nextQueue = rest.length === 0 ? others : { ...others, [threadKey]: rest };
+          return {
+            queueByThreadKey: nextQueue,
+            inFlightByThreadKey: { ...current.inFlightByThreadKey, [threadKey]: head },
+          };
         });
         return head;
       },
+      completeInFlight: (threadKey, success) => {
+        set((state) => {
+          const inFlight = state.inFlightByThreadKey[threadKey];
+          if (!inFlight) return state;
+          const { [threadKey]: _removed, ...nextInFlight } = state.inFlightByThreadKey;
+          if (success) {
+            return { inFlightByThreadKey: nextInFlight };
+          }
+          const existingQueue = state.queueByThreadKey[threadKey] ?? [];
+          return {
+            inFlightByThreadKey: nextInFlight,
+            queueByThreadKey: {
+              ...state.queueByThreadKey,
+              [threadKey]: [inFlight, ...existingQueue],
+            },
+          };
+        });
+      },
       clearForThread: (threadKey) => {
         set((state) => {
-          if (!state.queueByThreadKey[threadKey]) return state;
-          const { [threadKey]: _removed, ...rest } = state.queueByThreadKey;
-          return { queueByThreadKey: rest };
+          const hasQueue = Boolean(state.queueByThreadKey[threadKey]);
+          const hasInFlight = Boolean(state.inFlightByThreadKey[threadKey]);
+          if (!hasQueue && !hasInFlight) return state;
+          const { [threadKey]: _q, ...nextQueue } = state.queueByThreadKey;
+          const { [threadKey]: _f, ...nextInFlight } = state.inFlightByThreadKey;
+          return { queueByThreadKey: nextQueue, inFlightByThreadKey: nextInFlight };
         });
       },
       reorder: (threadKey, fromIndex, toIndex) => {
@@ -168,7 +213,28 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
       name: COMPOSER_QUEUE_STORAGE_KEY,
       version: COMPOSER_QUEUE_STORAGE_VERSION,
       storage: createJSONStorage(() => composerQueueDebouncedStorage),
-      partialize: (state) => ({ queueByThreadKey: state.queueByThreadKey }),
+      partialize: (state) => ({
+        queueByThreadKey: state.queueByThreadKey,
+        inFlightByThreadKey: state.inFlightByThreadKey,
+      }),
+      // On reload, any persisted in-flight entry was mid-dispatch when the
+      // tab closed. We can't tell whether the server actually received it,
+      // so we put it back at the front of the queue. The trade-off: if the
+      // dispatch DID reach the server, the next flush will send a near-
+      // duplicate. We bias toward this over silent loss because the user
+      // can see and remove a duplicate but can't recover a lost message.
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        const inFlight = state.inFlightByThreadKey ?? {};
+        if (Object.keys(inFlight).length === 0) return;
+        const nextQueue = { ...state.queueByThreadKey };
+        for (const [threadKey, entry] of Object.entries(inFlight)) {
+          const existing = nextQueue[threadKey] ?? [];
+          nextQueue[threadKey] = [entry, ...existing];
+        }
+        state.queueByThreadKey = nextQueue;
+        state.inFlightByThreadKey = {};
+      },
     },
   ),
 );
