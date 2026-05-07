@@ -1,6 +1,11 @@
 import { useEffect } from "react";
 import { parseScopedThreadKey } from "@t3tools/client-runtime";
-import { useComposerQueueStore, type QueuedMessageEntry } from "../composerQueueStore";
+import { useShallow } from "zustand/react/shallow";
+import {
+  selectQueueFlushHeadIds,
+  useComposerQueueStore,
+  type QueuedMessageEntry,
+} from "../composerQueueStore";
 import { selectThreadByRef, useStore } from "../store";
 import { isLatestTurnSettled } from "../session-logic";
 import { dispatchUserMessage } from "../lib/dispatchUserMessage";
@@ -14,17 +19,17 @@ import { stackedThreadToast, toastManager } from "../components/ui/toast";
 // beginInFlight (returns null if a slot is already occupied), so two
 // flushers can't take the same head.
 //
-// Skipped silently when the queued thread's environment hasn't loaded
-// its provider list yet — the entry stays queued and the next render
-// attempts again.
+// Subscribes via selectQueueFlushHeadIds with useShallow so the effect
+// re-runs only when a thread's queue head id changes — not on reorders
+// below the head, not on changes to the active thread's queue.
 export function useBackgroundQueueFlusher(activeThreadKey: string | null) {
-  const queueByThreadKey = useComposerQueueStore((state) => state.queueByThreadKey);
+  const headIdByThreadKey = useComposerQueueStore(
+    useShallow((state) => selectQueueFlushHeadIds(state, activeThreadKey)),
+  );
   const envRuntimeById = useSavedEnvironmentRuntimeStore((s) => s.byId);
 
   useEffect(() => {
-    for (const [threadKey, queue] of Object.entries(queueByThreadKey)) {
-      if (queue.length === 0) continue;
-      if (threadKey === activeThreadKey) continue;
+    for (const threadKey of Object.keys(headIdByThreadKey)) {
       const threadRef = parseScopedThreadKey(threadKey);
       if (!threadRef) continue;
       const state = useStore.getState();
@@ -35,7 +40,7 @@ export function useBackgroundQueueFlusher(activeThreadKey: string | null) {
       }
       const providerStatuses = envRuntimeById[threadRef.environmentId]?.serverConfig?.providers;
       if (!providerStatuses) continue;
-      const head = queue[0];
+      const head = useComposerQueueStore.getState().queueByThreadKey[threadKey]?.[0];
       if (!head) continue;
       const modelSelection = head.modelSelection ?? thread.modelSelection;
       const providerEntry = providerStatuses.find(
@@ -76,7 +81,7 @@ export function useBackgroundQueueFlusher(activeThreadKey: string | null) {
           surfaceDroppedQueueEntry(completion.droppedAfterRetries);
         });
     }
-  }, [queueByThreadKey, activeThreadKey, envRuntimeById]);
+  }, [headIdByThreadKey, envRuntimeById]);
 }
 
 export function surfaceDroppedQueueEntry(entry: QueuedMessageEntry | null): void {

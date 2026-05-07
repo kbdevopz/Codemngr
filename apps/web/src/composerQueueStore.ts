@@ -73,7 +73,8 @@ export interface QueuedMessageEntry {
   failureCount?: number;
 }
 
-export type EnqueueResult = { ok: true } | { ok: false; reason: "queue-full" | "entry-too-large" };
+export type EnqueueFailureReason = "queue-full" | "entry-too-large";
+export type EnqueueResult = { ok: true } | { ok: false; reason: EnqueueFailureReason };
 
 export interface ComposerQueueStoreState {
   queueByThreadKey: Record<string, ReadonlyArray<QueuedMessageEntry>>;
@@ -271,6 +272,26 @@ export function useQueueHeadIdForThread(threadKey: string): string | null {
 
 export function useInFlightEntryForThread(threadKey: string): QueuedMessageEntry | null {
   return useComposerQueueStore((store) => store.inFlightByThreadKey[threadKey] ?? null);
+}
+
+// Returns a {threadKey: headId} map for every thread (other than
+// excludeThreadKey) with at least one queued entry. Subscribers can
+// pair this with useShallow so the hook only re-runs when a thread's
+// queue head changes — not on reorders below the head, and not on
+// changes scoped to the excluded (active) thread.
+export function selectQueueFlushHeadIds(
+  state: ComposerQueueStoreState,
+  excludeThreadKey: string | null,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [threadKey, queue] of Object.entries(state.queueByThreadKey)) {
+    if (queue.length === 0) continue;
+    if (threadKey === excludeThreadKey) continue;
+    const head = queue[0];
+    if (!head) continue;
+    result[threadKey] = head.id;
+  }
+  return result;
 }
 
 const EMPTY_QUEUE: ReadonlyArray<QueuedMessageEntry> = Object.freeze([]);

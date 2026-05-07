@@ -308,16 +308,19 @@ interface PersistThreadSettingsInput {
   interactionMode: ProviderInteractionMode;
 }
 
+function modelSelectionsEqual(left: ModelSelection, right: ModelSelection): boolean {
+  if (left.model !== right.model) return false;
+  if (left.instanceId !== right.instanceId) return false;
+  return JSON.stringify(left.options ?? null) === JSON.stringify(right.options ?? null);
+}
+
 async function persistThreadSettingsForTurn(input: PersistThreadSettingsInput): Promise<void> {
   const api = readEnvironmentApi(input.environmentId);
   if (!api) return;
   const { thread } = input;
   if (
     input.modelSelection !== undefined &&
-    (input.modelSelection.model !== thread.modelSelection.model ||
-      input.modelSelection.instanceId !== thread.modelSelection.instanceId ||
-      JSON.stringify(input.modelSelection.options ?? null) !==
-        JSON.stringify(thread.modelSelection.options ?? null))
+    !modelSelectionsEqual(input.modelSelection, thread.modelSelection)
   ) {
     await api.orchestration.dispatchCommand({
       type: "thread.meta.update",
