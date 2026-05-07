@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD,
   COMPOSER_QUEUE_MAX_ENTRY_BYTES,
+  COMPOSER_QUEUE_MAX_FAILURE_COUNT,
   newQueuedMessageId,
   useComposerQueueStore,
 } from "./composerQueueStore";
@@ -89,23 +90,42 @@ describe("composerQueueStore", () => {
     const { enqueue, beginInFlight, completeInFlight } = useComposerQueueStore.getState();
     enqueue(THREAD_A, entry);
     beginInFlight(THREAD_A);
-    completeInFlight(THREAD_A, true);
+    const result = completeInFlight(THREAD_A, true);
+    expect(result.droppedAfterRetries).toBeNull();
     const state = useComposerQueueStore.getState();
     expect(state.inFlightByThreadKey[THREAD_A]).toBeUndefined();
     expect(state.queueByThreadKey[THREAD_A]).toBeUndefined();
   });
 
-  it("completeInFlight on failure prepends the entry back to the queue", () => {
+  it("completeInFlight on failure prepends the entry back to the queue with failureCount", () => {
     const head = makeEntry("head");
     const tail = makeEntry("tail");
     const { enqueue, beginInFlight, completeInFlight } = useComposerQueueStore.getState();
     enqueue(THREAD_A, head);
     enqueue(THREAD_A, tail);
     beginInFlight(THREAD_A);
-    completeInFlight(THREAD_A, false);
+    const result = completeInFlight(THREAD_A, false);
+    expect(result.droppedAfterRetries).toBeNull();
     const state = useComposerQueueStore.getState();
     expect(state.inFlightByThreadKey[THREAD_A]).toBeUndefined();
     expect(state.queueByThreadKey[THREAD_A]?.map((entry) => entry.id)).toEqual([head.id, tail.id]);
+    expect(state.queueByThreadKey[THREAD_A]?.[0]?.failureCount).toBe(1);
+  });
+
+  it("completeInFlight drops the entry after MAX_FAILURE_COUNT retries", () => {
+    const entry = makeEntry("flaky");
+    const { enqueue, beginInFlight, completeInFlight } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, entry);
+    let lastResult: ReturnType<typeof completeInFlight> | null = null;
+    for (let attempt = 0; attempt < COMPOSER_QUEUE_MAX_FAILURE_COUNT + 1; attempt += 1) {
+      const taken = beginInFlight(THREAD_A);
+      expect(taken).not.toBeNull();
+      lastResult = completeInFlight(THREAD_A, false);
+    }
+    expect(lastResult?.droppedAfterRetries?.id).toBe(entry.id);
+    const state = useComposerQueueStore.getState();
+    expect(state.queueByThreadKey[THREAD_A]).toBeUndefined();
+    expect(state.inFlightByThreadKey[THREAD_A]).toBeUndefined();
   });
 
   it("clearForThread removes the thread's queue but preserves others", () => {

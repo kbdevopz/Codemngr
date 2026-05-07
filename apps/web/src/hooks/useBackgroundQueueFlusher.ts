@@ -6,6 +6,7 @@ import { isLatestTurnSettled } from "../session-logic";
 import { dispatchUserMessage } from "../lib/dispatchUserMessage";
 import { hydrateImagesFromPersisted } from "../composerDraftStore";
 import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
+import { stackedThreadToast, toastManager } from "../components/ui/toast";
 
 // Best-effort dispatcher for queued messages on threads the user isn't
 // currently viewing. Lives at app shell level so it runs regardless of
@@ -73,19 +74,41 @@ export function useBackgroundQueueFlusher(activeThreadKey: string | null) {
         interactionMode: taken.interactionMode ?? thread.interactionMode,
       })
         .then((result) => {
-          // On success, drop the in-flight entry. On failure (network
-          // glitch, server error) keep the entry queued so the user can
-          // see it and either retry by navigating to the thread or
-          // remove it manually. Persistent failures still set thread
-          // error inside dispatchUserMessage so the user gets feedback.
-          useComposerQueueStore.getState().completeInFlight(threadKey, result.ok);
+          // On success, drop the in-flight entry. On failure keep the
+          // entry queued so the user can see it and either retry by
+          // navigating to the thread or remove it manually. After N
+          // consecutive failures completeInFlight drops the entry; we
+          // surface a toast so the message doesn't vanish silently.
+          const completion = useComposerQueueStore
+            .getState()
+            .completeInFlight(threadKey, result.ok);
+          surfaceDroppedQueueEntry(completion.droppedAfterRetries);
         })
         .catch(() => {
-          useComposerQueueStore.getState().completeInFlight(threadKey, false);
+          const completion = useComposerQueueStore.getState().completeInFlight(threadKey, false);
+          surfaceDroppedQueueEntry(completion.droppedAfterRetries);
         })
         .finally(() => {
           inFlightRef.current.delete(threadKey);
         });
     }
   }, [queueByThreadKey, activeThreadKey, envRuntimeById]);
+}
+
+function surfaceDroppedQueueEntry(
+  entry: ReturnType<
+    ReturnType<typeof useComposerQueueStore.getState>["completeInFlight"]
+  >["droppedAfterRetries"],
+): void {
+  if (!entry) return;
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Queued message dropped after repeated failures",
+      description:
+        entry.text.length > 0
+          ? entry.text
+          : "Message had no text. Re-queue from history if needed.",
+    }),
+  );
 }

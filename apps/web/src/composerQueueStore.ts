@@ -27,6 +27,10 @@ const COMPOSER_QUEUE_PERSIST_DEBOUNCE_MS = 300;
 export const COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD = 25;
 export const COMPOSER_QUEUE_MAX_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MB per entry
 
+// After this many consecutive dispatch failures the entry is dropped and
+// the caller is notified instead of re-queueing forever.
+export const COMPOSER_QUEUE_MAX_FAILURE_COUNT = 3;
+
 const composerQueueDebouncedStorage = createDebouncedStorage(
   typeof localStorage !== "undefined" ? localStorage : createMemoryStorage(),
   COMPOSER_QUEUE_PERSIST_DEBOUNCE_MS,
@@ -61,6 +65,13 @@ export interface QueuedMessageEntry {
   modelSelection?: ModelSelection;
   runtimeMode?: RuntimeMode;
   interactionMode?: ProviderInteractionMode;
+  /**
+   * Incremented each time a dispatch attempt fails and the entry is
+   * re-queued. After COMPOSER_QUEUE_MAX_FAILURE_COUNT, the entry is
+   * dropped instead and completeInFlight returns the dropped entry so
+   * the caller can surface a notification.
+   */
+  failureCount?: number;
 }
 
 export type EnqueueResult = { ok: true } | { ok: false; reason: "queue-full" | "entry-too-large" };
@@ -86,10 +97,15 @@ export interface ComposerQueueStoreState {
   beginInFlight: (threadKey: string) => QueuedMessageEntry | null;
   /**
    * Called when the dispatch finishes. On success, drops the in-flight
-   * entry. On failure, prepends it back to the queue so it gets retried
-   * on the next settle (or by the user).
+   * entry. On failure, increments the failureCount and prepends back to
+   * the queue head. After COMPOSER_QUEUE_MAX_FAILURE_COUNT failures the
+   * entry is dropped and returned via the result so the caller can
+   * notify the user that it was abandoned.
    */
-  completeInFlight: (threadKey: string, success: boolean) => void;
+  completeInFlight: (
+    threadKey: string,
+    success: boolean,
+  ) => { droppedAfterRetries: QueuedMessageEntry | null };
   clearForThread: (threadKey: string) => void;
   reorder: (threadKey: string, fromIndex: number, toIndex: number) => void;
 }
@@ -165,22 +181,29 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
         return head;
       },
       completeInFlight: (threadKey, success) => {
+        const inFlight = get().inFlightByThreadKey[threadKey];
+        if (!inFlight) return { droppedAfterRetries: null };
+        const nextFailureCount = (inFlight.failureCount ?? 0) + 1;
+        const shouldDrop = !success && nextFailureCount > COMPOSER_QUEUE_MAX_FAILURE_COUNT;
         set((state) => {
-          const inFlight = state.inFlightByThreadKey[threadKey];
-          if (!inFlight) return state;
           const { [threadKey]: _removed, ...nextInFlight } = state.inFlightByThreadKey;
-          if (success) {
+          if (success || shouldDrop) {
             return { inFlightByThreadKey: nextInFlight };
           }
           const existingQueue = state.queueByThreadKey[threadKey] ?? [];
+          const requeued: QueuedMessageEntry = {
+            ...inFlight,
+            failureCount: nextFailureCount,
+          };
           return {
             inFlightByThreadKey: nextInFlight,
             queueByThreadKey: {
               ...state.queueByThreadKey,
-              [threadKey]: [inFlight, ...existingQueue],
+              [threadKey]: [requeued, ...existingQueue],
             },
           };
         });
+        return { droppedAfterRetries: shouldDrop ? inFlight : null };
       },
       clearForThread: (threadKey) => {
         set((state) => {

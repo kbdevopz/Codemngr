@@ -2693,7 +2693,19 @@ export default function ChatView(props: ChatViewProps) {
         runtimeMode: taken.runtimeMode ?? runtimeMode,
         interactionMode: taken.interactionMode ?? interactionMode,
       });
-      completeQueuedDispatch(routeThreadKey, result.ok);
+      const completion = completeQueuedDispatch(routeThreadKey, result.ok);
+      if (completion.droppedAfterRetries) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Queued message dropped after repeated failures",
+            description:
+              completion.droppedAfterRetries.text.length > 0
+                ? completion.droppedAfterRetries.text
+                : "Message had no text. Re-queue from history if needed.",
+          }),
+        );
+      }
     });
   }, [
     queueHeadId,
