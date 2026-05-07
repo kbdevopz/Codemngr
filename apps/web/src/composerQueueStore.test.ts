@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { useComposerQueueStore, newQueuedMessageId } from "./composerQueueStore";
+import {
+  COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD,
+  COMPOSER_QUEUE_MAX_ENTRY_BYTES,
+  newQueuedMessageId,
+  useComposerQueueStore,
+} from "./composerQueueStore";
 
 const THREAD_A = "environment-local:thread-a";
 const THREAD_B = "environment-local:thread-b";
@@ -81,6 +86,61 @@ describe("composerQueueStore", () => {
   it("newQueuedMessageId returns unique values", () => {
     const ids = new Set([newQueuedMessageId(), newQueuedMessageId(), newQueuedMessageId()]);
     expect(ids.size).toBe(3);
+  });
+
+  it("rejects enqueue when the per-thread cap is reached", () => {
+    const { enqueue } = useComposerQueueStore.getState();
+    for (let index = 0; index < COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD; index += 1) {
+      const result = enqueue(THREAD_A, makeEntry(`message ${index}`));
+      expect(result.ok).toBe(true);
+    }
+    const overflow = enqueue(THREAD_A, makeEntry("over the limit"));
+    expect(overflow).toEqual({ ok: false, reason: "queue-full" });
+    expect(useComposerQueueStore.getState().queueByThreadKey[THREAD_A]?.length).toBe(
+      COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD,
+    );
+  });
+
+  it("rejects entries that would exceed the per-entry size cap", () => {
+    const { enqueue } = useComposerQueueStore.getState();
+    const oversizedDataUrl = `data:image/png;base64,${"A".repeat(COMPOSER_QUEUE_MAX_ENTRY_BYTES + 1)}`;
+    const oversized = enqueue(THREAD_A, {
+      ...makeEntry("with huge image"),
+      images: [
+        {
+          id: "image-huge",
+          name: "huge.png",
+          mimeType: "image/png",
+          sizeBytes: oversizedDataUrl.length,
+          dataUrl: oversizedDataUrl,
+        },
+      ],
+    });
+    expect(oversized).toEqual({ ok: false, reason: "entry-too-large" });
+    expect(useComposerQueueStore.getState().queueByThreadKey[THREAD_A]).toBeUndefined();
+  });
+
+  it("reorder swaps positions in place", () => {
+    const a = makeEntry("a");
+    const b = makeEntry("b");
+    const c = makeEntry("c");
+    const { enqueue, reorder } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, a);
+    enqueue(THREAD_A, b);
+    enqueue(THREAD_A, c);
+    reorder(THREAD_A, 0, 2);
+    expect(
+      useComposerQueueStore.getState().queueByThreadKey[THREAD_A]?.map((entry) => entry.text),
+    ).toEqual(["b", "c", "a"]);
+  });
+
+  it("reorder is a no-op for invalid indices", () => {
+    const { enqueue, reorder } = useComposerQueueStore.getState();
+    enqueue(THREAD_A, makeEntry("only"));
+    reorder(THREAD_A, 0, 5);
+    expect(useComposerQueueStore.getState().queueByThreadKey[THREAD_A]?.length).toBe(1);
+    reorder(THREAD_A, -1, 0);
+    expect(useComposerQueueStore.getState().queueByThreadKey[THREAD_A]?.length).toBe(1);
   });
 
   it("preserves images and terminal contexts captured at enqueue time", () => {

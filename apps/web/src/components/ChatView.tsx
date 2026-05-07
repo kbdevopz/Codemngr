@@ -129,7 +129,9 @@ import {
   type DraftId,
 } from "../composerDraftStore";
 import {
+  COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD,
   newQueuedMessageId,
+  type QueuedMessageEntry,
   useComposerQueueStore,
   useQueueHeadIdForThread,
 } from "../composerQueueStore";
@@ -2036,6 +2038,7 @@ export default function ChatView(props: ChatViewProps) {
   // since queueing those requires a snapshot-driven dispatch refactor.
   const enqueueComposerMessage = useComposerQueueStore((store) => store.enqueue);
   const takeNextQueuedMessage = useComposerQueueStore((store) => store.takeNext);
+  const removeQueuedMessage = useComposerQueueStore((store) => store.removeEntry);
   const queueHeadId = useQueueHeadIdForThread(routeThreadKey);
   const onSendRef = useRef<((e?: { preventDefault: () => void }) => Promise<void>) | null>(null);
 
@@ -2514,7 +2517,7 @@ export default function ChatView(props: ChatViewProps) {
           dataUrl: await readFileAsDataUrl(image.file),
         })),
       );
-      enqueueComposerMessage(routeThreadKey, {
+      const enqueueResult = enqueueComposerMessage(routeThreadKey, {
         id: newQueuedMessageId(),
         text: trimmed,
         createdAt: new Date().toISOString(),
@@ -2524,6 +2527,22 @@ export default function ChatView(props: ChatViewProps) {
         runtimeMode,
         interactionMode,
       });
+      if (!enqueueResult.ok) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title:
+              enqueueResult.reason === "queue-full"
+                ? "Queue is full"
+                : "Message too large to queue",
+            description:
+              enqueueResult.reason === "queue-full"
+                ? `At most ${COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD} messages can be queued per thread. Wait for some to send, then try again.`
+                : "Try queueing without attachments or with smaller images.",
+          }),
+        );
+        return;
+      }
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
@@ -2736,6 +2755,51 @@ export default function ChatView(props: ChatViewProps) {
     runtimeMode,
     interactionMode,
   ]);
+
+  // Restore a queued entry back into the composer so the user can edit it.
+  // Removes the entry from the queue; the user's existing draft (if any) is
+  // overwritten — same trade-off as composerDraftStore's retry restore path.
+  const onEditQueuedEntry = useCallback(
+    (entry: QueuedMessageEntry) => {
+      const hydratedImages = entry.images ? hydrateImagesFromPersisted(entry.images) : [];
+      const queuedTerminalContexts = [...(entry.terminalContexts ?? [])];
+      promptRef.current = entry.text;
+      composerImagesRef.current = hydratedImages;
+      composerTerminalContextsRef.current = queuedTerminalContexts;
+      if (entry.modelSelection) {
+        setComposerDraftModelSelection(composerDraftTarget, entry.modelSelection);
+      }
+      if (entry.runtimeMode) {
+        setComposerDraftRuntimeMode(composerDraftTarget, entry.runtimeMode);
+      }
+      if (entry.interactionMode) {
+        setComposerDraftInteractionMode(composerDraftTarget, entry.interactionMode);
+      }
+      setComposerDraftPrompt(composerDraftTarget, entry.text);
+      if (hydratedImages.length > 0) {
+        addComposerDraftImages(composerDraftTarget, hydratedImages);
+      }
+      setComposerDraftTerminalContexts(composerDraftTarget, queuedTerminalContexts);
+      composerRef.current?.resetCursorState({
+        cursor: collapseExpandedComposerCursor(entry.text, entry.text.length),
+        prompt: entry.text,
+        detectTrigger: false,
+      });
+      composerRef.current?.focusAtEnd();
+      removeQueuedMessage(routeThreadKey, entry.id);
+    },
+    [
+      addComposerDraftImages,
+      composerDraftTarget,
+      removeQueuedMessage,
+      routeThreadKey,
+      setComposerDraftInteractionMode,
+      setComposerDraftModelSelection,
+      setComposerDraftPrompt,
+      setComposerDraftRuntimeMode,
+      setComposerDraftTerminalContexts,
+    ],
+  );
 
   const onInterrupt = async () => {
     const api = readEnvironmentApi(environmentId);
@@ -3426,7 +3490,7 @@ export default function ChatView(props: ChatViewProps) {
             )}
           >
             <div className="mx-auto w-full min-w-0 max-w-208">
-              <ComposerQueuedMessages threadKey={routeThreadKey} />
+              <ComposerQueuedMessages threadKey={routeThreadKey} onEditEntry={onEditQueuedEntry} />
             </div>
             <ChatComposer
               ref={composerRef}

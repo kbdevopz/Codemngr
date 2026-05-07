@@ -1,24 +1,34 @@
 import { memo, useCallback } from "react";
-import { ImageIcon, TerminalIcon, XIcon } from "lucide-react";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  ImageIcon,
+  PencilIcon,
+  TerminalIcon,
+  XIcon,
+} from "lucide-react";
 import { cn } from "~/lib/utils";
 import {
-  useQueuedMessagesForThread,
   useComposerQueueStore,
+  useQueuedMessagesForThread,
   type QueuedMessageEntry,
 } from "~/composerQueueStore";
 
 interface ComposerQueuedMessagesProps {
   threadKey: string;
   className?: string;
+  onEditEntry?: (entry: QueuedMessageEntry) => void;
 }
 
 export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   threadKey,
   className,
+  onEditEntry,
 }: ComposerQueuedMessagesProps) {
   const queue = useQueuedMessagesForThread(threadKey);
   const removeEntry = useComposerQueueStore((store) => store.removeEntry);
   const clearForThread = useComposerQueueStore((store) => store.clearForThread);
+  const reorder = useComposerQueueStore((store) => store.reorder);
 
   const handleRemove = useCallback(
     (entryId: string) => () => {
@@ -30,6 +40,20 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   const handleClearAll = useCallback(() => {
     clearForThread(threadKey);
   }, [clearForThread, threadKey]);
+
+  const handleMove = useCallback(
+    (fromIndex: number, delta: number) => () => {
+      reorder(threadKey, fromIndex, fromIndex + delta);
+    },
+    [reorder, threadKey],
+  );
+
+  const handleEdit = useCallback(
+    (entry: QueuedMessageEntry) => () => {
+      onEditEntry?.(entry);
+    },
+    [onEditEntry],
+  );
 
   if (queue.length === 0) {
     return null;
@@ -64,7 +88,12 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
             key={entry.id}
             entry={entry}
             position={index + 1}
+            isFirst={index === 0}
+            isLast={index === queue.length - 1}
             onRemove={handleRemove(entry.id)}
+            onMoveUp={handleMove(index, -1)}
+            onMoveDown={handleMove(index, 1)}
+            {...(onEditEntry ? { onEdit: handleEdit(entry) } : {})}
           />
         ))}
       </ul>
@@ -75,13 +104,23 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
 interface QueuedMessageRowProps {
   entry: QueuedMessageEntry;
   position: number;
+  isFirst: boolean;
+  isLast: boolean;
   onRemove: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  onEdit?: () => void;
 }
 
 const QueuedMessageRow = memo(function QueuedMessageRow({
   entry,
   position,
+  isFirst,
+  isLast,
   onRemove,
+  onMoveUp,
+  onMoveDown,
+  onEdit,
 }: QueuedMessageRowProps) {
   const imageCount = entry.images?.length ?? 0;
   const contextCount = entry.terminalContexts?.length ?? 0;
@@ -129,14 +168,45 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
           {contextCount}
         </span>
       )}
-      <button
-        type="button"
-        onClick={onRemove}
-        className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-        aria-label="Remove queued message"
-      >
-        <XIcon className="h-3.5 w-3.5" />
-      </button>
+      <div className="flex items-center gap-0.5 opacity-60 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        <button
+          type="button"
+          onClick={onMoveUp}
+          disabled={isFirst}
+          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          aria-label="Move up"
+        >
+          <ArrowUpIcon className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          onClick={onMoveDown}
+          disabled={isLast}
+          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
+          aria-label="Move down"
+        >
+          <ArrowDownIcon className="h-3.5 w-3.5" />
+        </button>
+        {onEdit && (
+          <button
+            type="button"
+            onClick={onEdit}
+            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+            aria-label="Edit queued message"
+            title="Edit — restores to the composer and removes from the queue"
+          >
+            <PencilIcon className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRemove}
+          className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          aria-label="Remove queued message"
+        >
+          <XIcon className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </li>
   );
 });

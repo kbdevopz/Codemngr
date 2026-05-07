@@ -21,6 +21,12 @@ export const COMPOSER_QUEUE_STORAGE_KEY = "codemngr:composer-queue:v1";
 const COMPOSER_QUEUE_STORAGE_VERSION = 1;
 const COMPOSER_QUEUE_PERSIST_DEBOUNCE_MS = 300;
 
+// Hard caps so the queue can't grow without bound and exhaust localStorage.
+// Background flush tends to drain queues quickly, so these limits should
+// only kick in for pathological use (e.g. user pastes 50 messages in a row).
+export const COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD = 25;
+export const COMPOSER_QUEUE_MAX_ENTRY_BYTES = 2 * 1024 * 1024; // 2 MB per entry
+
 const composerQueueDebouncedStorage = createDebouncedStorage(
   typeof localStorage !== "undefined" ? localStorage : createMemoryStorage(),
   COMPOSER_QUEUE_PERSIST_DEBOUNCE_MS,
@@ -57,12 +63,30 @@ export interface QueuedMessageEntry {
   interactionMode?: ProviderInteractionMode;
 }
 
+export type EnqueueResult = { ok: true } | { ok: false; reason: "queue-full" | "entry-too-large" };
+
 export interface ComposerQueueStoreState {
   queueByThreadKey: Record<string, ReadonlyArray<QueuedMessageEntry>>;
-  enqueue: (threadKey: string, entry: QueuedMessageEntry) => void;
+  enqueue: (threadKey: string, entry: QueuedMessageEntry) => EnqueueResult;
   removeEntry: (threadKey: string, entryId: string) => void;
   takeNext: (threadKey: string) => QueuedMessageEntry | null;
   clearForThread: (threadKey: string) => void;
+  reorder: (threadKey: string, fromIndex: number, toIndex: number) => void;
+}
+
+function approximateEntryBytes(entry: QueuedMessageEntry): number {
+  let bytes = entry.text.length * 2;
+  if (entry.images) {
+    for (const image of entry.images) {
+      bytes += image.dataUrl.length;
+    }
+  }
+  if (entry.terminalContexts) {
+    for (const context of entry.terminalContexts) {
+      bytes += context.text.length * 2;
+    }
+  }
+  return bytes;
 }
 
 export const useComposerQueueStore = create<ComposerQueueStoreState>()(
@@ -70,6 +94,13 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
     (set, get) => ({
       queueByThreadKey: {},
       enqueue: (threadKey, entry) => {
+        if (approximateEntryBytes(entry) > COMPOSER_QUEUE_MAX_ENTRY_BYTES) {
+          return { ok: false, reason: "entry-too-large" };
+        }
+        const current = get().queueByThreadKey[threadKey] ?? [];
+        if (current.length >= COMPOSER_QUEUE_MAX_ENTRIES_PER_THREAD) {
+          return { ok: false, reason: "queue-full" };
+        }
         set((state) => {
           const existing = state.queueByThreadKey[threadKey] ?? [];
           return {
@@ -79,6 +110,7 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
             },
           };
         });
+        return { ok: true };
       },
       removeEntry: (threadKey, entryId) => {
         set((state) => {
@@ -113,6 +145,22 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
           if (!state.queueByThreadKey[threadKey]) return state;
           const { [threadKey]: _removed, ...rest } = state.queueByThreadKey;
           return { queueByThreadKey: rest };
+        });
+      },
+      reorder: (threadKey, fromIndex, toIndex) => {
+        set((state) => {
+          const existing = state.queueByThreadKey[threadKey];
+          if (!existing) return state;
+          if (fromIndex < 0 || fromIndex >= existing.length) return state;
+          const clampedTo = Math.max(0, Math.min(toIndex, existing.length - 1));
+          if (clampedTo === fromIndex) return state;
+          const next = [...existing];
+          const [moved] = next.splice(fromIndex, 1);
+          if (!moved) return state;
+          next.splice(clampedTo, 0, moved);
+          return {
+            queueByThreadKey: { ...state.queueByThreadKey, [threadKey]: next },
+          };
         });
       },
     }),
