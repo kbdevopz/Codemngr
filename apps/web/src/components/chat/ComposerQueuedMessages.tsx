@@ -181,16 +181,44 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
     onEditEntry?.(entry);
   }, [onEditEntry, entry]);
 
+  const handleRowKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLLIElement>) => {
+      if ((event.target as HTMLElement).closest("button")) return;
+      if (event.key === "ArrowUp" && (event.metaKey || event.altKey) && !isFirst) {
+        event.preventDefault();
+        handleMoveUp();
+        return;
+      }
+      if (event.key === "ArrowDown" && (event.metaKey || event.altKey) && !isLast) {
+        event.preventDefault();
+        handleMoveDown();
+        return;
+      }
+      if ((event.key === "Backspace" || event.key === "Delete") && !event.metaKey) {
+        event.preventDefault();
+        handleRemove();
+        return;
+      }
+      if (event.key === "Enter" && onEditEntry) {
+        event.preventDefault();
+        handleEdit();
+      }
+    },
+    [handleEdit, handleMoveDown, handleMoveUp, handleRemove, isFirst, isLast, onEditEntry],
+  );
+
   const failureCount = entry.failureCount ?? 0;
   const hasFailure = failureCount > 0;
 
   return (
     <li
       className={cn(
-        "group flex items-center gap-2 rounded-md border bg-background px-2.5 py-1.5",
+        "group flex items-center gap-2 rounded-md border bg-background px-2.5 py-1.5 outline-none focus-visible:ring-1 focus-visible:ring-ring",
         hasFailure ? "border-amber-500/60" : "border-border/70",
       )}
       data-testid="composer-queued-message-entry"
+      tabIndex={0}
+      onKeyDown={handleRowKeyDown}
     >
       <span className="text-[10px] font-semibold tabular-nums text-muted-foreground/70">
         {position}
