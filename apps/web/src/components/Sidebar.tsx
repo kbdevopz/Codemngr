@@ -202,6 +202,32 @@ const SIDEBAR_LIST_ANIMATION_OPTIONS = {
   easing: "ease-out",
 } as const;
 const EMPTY_THREAD_JUMP_LABELS = new Map<string, string>();
+const EMPTY_QUEUE_PREVIEWS: ReadonlyArray<string> = Object.freeze([]);
+
+function formatQueueEntryPreview(
+  entry: {
+    text: string;
+    images?: ReadonlyArray<unknown>;
+    terminalContexts?: ReadonlyArray<unknown>;
+  },
+  inFlight: boolean,
+): string {
+  const prefix = inFlight ? "⏳ " : "";
+  if (entry.text.length > 0) {
+    const trimmed = entry.text.length > 80 ? `${entry.text.slice(0, 80)}…` : entry.text;
+    return `${prefix}${trimmed}`;
+  }
+  const imageCount = entry.images?.length ?? 0;
+  if (imageCount > 0) {
+    return `${prefix}${imageCount} image${imageCount === 1 ? "" : "s"}`;
+  }
+  const contextCount = entry.terminalContexts?.length ?? 0;
+  if (contextCount > 0) {
+    return `${prefix}${contextCount} terminal context${contextCount === 1 ? "" : "s"}`;
+  }
+  return `${prefix}Empty message`;
+}
+
 const PROJECT_GROUPING_MODE_LABELS: Record<SidebarProjectGroupingMode, string> = {
   repository: "Group by repository",
   repository_path: "Group by repository path",
@@ -329,6 +355,20 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     (state) =>
       (state.queueByThreadKey[threadKey]?.length ?? 0) +
       (state.inFlightByThreadKey[threadKey] ? 1 : 0),
+  );
+  const queuedMessagePreviews = useComposerQueueStore(
+    useShallow((state) => {
+      if (queuedMessageCount === 0) return EMPTY_QUEUE_PREVIEWS;
+      const inFlight = state.inFlightByThreadKey[threadKey];
+      const queue = state.queueByThreadKey[threadKey] ?? [];
+      const previews: string[] = [];
+      if (inFlight) previews.push(formatQueueEntryPreview(inFlight, true));
+      for (const entry of queue.slice(0, 5)) {
+        previews.push(formatQueueEntryPreview(entry, false));
+      }
+      if (queue.length > 5) previews.push(`+${queue.length - 5} more…`);
+      return previews;
+    }),
   );
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const hasSelection = useThreadSelectionStore((state) => state.selectedThreadKeys.size > 0);
@@ -603,15 +643,34 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
           {queuedMessageCount > 0 && (
-            <span
-              role="img"
-              aria-label={`${queuedMessageCount} queued ${queuedMessageCount === 1 ? "message" : "messages"}`}
-              title={`${queuedMessageCount} queued ${queuedMessageCount === 1 ? "message" : "messages"} — sent when the current turn ends`}
-              className="inline-flex items-center gap-0.5 text-muted-foreground"
-            >
-              <ClockIcon className="size-3" />
-              <span className="text-[10px] font-medium tabular-nums">{queuedMessageCount}</span>
-            </span>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <span
+                    role="img"
+                    aria-label={`${queuedMessageCount} queued ${queuedMessageCount === 1 ? "message" : "messages"}`}
+                    className="inline-flex items-center gap-0.5 text-muted-foreground"
+                  >
+                    <ClockIcon className="size-3" />
+                    <span className="text-[10px] font-medium tabular-nums">
+                      {queuedMessageCount}
+                    </span>
+                  </span>
+                }
+              />
+              <TooltipPopup side="top" className="max-w-80 whitespace-normal leading-tight">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                  Queued ({queuedMessageCount})
+                </div>
+                <ul className="mt-1 flex flex-col gap-0.5 text-xs">
+                  {queuedMessagePreviews.map((preview, index) => (
+                    <li key={index} className="truncate">
+                      {preview}
+                    </li>
+                  ))}
+                </ul>
+              </TooltipPopup>
+            </Tooltip>
           )}
           {terminalStatus && (
             <span

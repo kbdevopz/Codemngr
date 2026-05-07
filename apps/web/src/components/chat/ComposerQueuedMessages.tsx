@@ -1,5 +1,6 @@
 import { memo, useCallback } from "react";
 import {
+  AlertTriangleIcon,
   ArrowDownIcon,
   ArrowUpIcon,
   ImageIcon,
@@ -10,6 +11,7 @@ import {
 } from "lucide-react";
 import { cn } from "~/lib/utils";
 import {
+  COMPOSER_QUEUE_MAX_FAILURE_COUNT,
   useComposerQueueStore,
   useInFlightEntryForThread,
   useQueuedMessagesForThread,
@@ -179,14 +181,29 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
     onEditEntry?.(entry);
   }, [onEditEntry, entry]);
 
+  const failureCount = entry.failureCount ?? 0;
+  const hasFailure = failureCount > 0;
+
   return (
     <li
-      className="group flex items-center gap-2 rounded-md border border-border/70 bg-background px-2.5 py-1.5"
+      className={cn(
+        "group flex items-center gap-2 rounded-md border bg-background px-2.5 py-1.5",
+        hasFailure ? "border-amber-500/60" : "border-border/70",
+      )}
       data-testid="composer-queued-message-entry"
     >
       <span className="text-[10px] font-semibold tabular-nums text-muted-foreground/70">
         {position}
       </span>
+      {hasFailure && (
+        <span
+          className="flex items-center gap-0.5 rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400"
+          title={`Last ${failureCount} attempt${failureCount === 1 ? "" : "s"} failed; will be dropped after ${COMPOSER_QUEUE_MAX_FAILURE_COUNT} consecutive failures`}
+        >
+          <AlertTriangleIcon className="h-3 w-3" aria-hidden="true" />
+          retry {failureCount}/{COMPOSER_QUEUE_MAX_FAILURE_COUNT}
+        </span>
+      )}
       <span
         className={cn(
           "min-w-0 flex-1 truncate text-sm",
