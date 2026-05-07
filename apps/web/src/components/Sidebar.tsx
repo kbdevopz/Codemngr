@@ -326,7 +326,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const threadKey = scopedThreadKey(threadRef);
   const lastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const queuedMessageCount = useComposerQueueStore(
-    (state) => state.queueByThreadKey[threadKey]?.length ?? 0,
+    (state) =>
+      (state.queueByThreadKey[threadKey]?.length ?? 0) +
+      (state.inFlightByThreadKey[threadKey] ? 1 : 0),
   );
   const isSelected = useThreadSelectionStore((state) => state.selectedThreadKeys.has(threadKey));
   const hasSelection = useThreadSelectionStore((state) => state.selectedThreadKeys.size > 0);

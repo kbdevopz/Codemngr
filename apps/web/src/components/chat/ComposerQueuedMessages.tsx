@@ -3,6 +3,7 @@ import {
   ArrowDownIcon,
   ArrowUpIcon,
   ImageIcon,
+  Loader2Icon,
   PencilIcon,
   TerminalIcon,
   XIcon,
@@ -10,6 +11,7 @@ import {
 import { cn } from "~/lib/utils";
 import {
   useComposerQueueStore,
+  useInFlightEntryForThread,
   useQueuedMessagesForThread,
   type QueuedMessageEntry,
 } from "~/composerQueueStore";
@@ -26,6 +28,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   onEditEntry,
 }: ComposerQueuedMessagesProps) {
   const queue = useQueuedMessagesForThread(threadKey);
+  const inFlightEntry = useInFlightEntryForThread(threadKey);
   const removeEntry = useComposerQueueStore((store) => store.removeEntry);
   const clearForThread = useComposerQueueStore((store) => store.clearForThread);
   const reorder = useComposerQueueStore((store) => store.reorder);
@@ -55,7 +58,8 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
     [onEditEntry],
   );
 
-  if (queue.length === 0) {
+  const totalCount = queue.length + (inFlightEntry ? 1 : 0);
+  if (totalCount === 0) {
     return null;
   }
 
@@ -68,7 +72,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
       data-testid="composer-queued-messages"
     >
       <div className="flex items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-        <span>Queued ({queue.length})</span>
+        <span>Queued ({totalCount})</span>
         <span className="min-w-0 flex-1 truncate text-muted-foreground/60">
           — sent in order when the current turn ends
         </span>
@@ -83,6 +87,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
         )}
       </div>
       <ul className="flex flex-col gap-1">
+        {inFlightEntry && <InFlightMessageRow entry={inFlightEntry} />}
         {queue.map((entry, index) => (
           <QueuedMessageRow
             key={entry.id}
@@ -98,6 +103,42 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
         ))}
       </ul>
     </div>
+  );
+});
+
+const InFlightMessageRow = memo(function InFlightMessageRow({
+  entry,
+}: {
+  entry: QueuedMessageEntry;
+}) {
+  const imageCount = entry.images?.length ?? 0;
+  const contextCount = entry.terminalContexts?.length ?? 0;
+  const hasText = entry.text.length > 0;
+  const previewText = hasText
+    ? entry.text
+    : imageCount > 0
+      ? `${imageCount} image${imageCount === 1 ? "" : "s"}`
+      : contextCount > 0
+        ? `${contextCount} terminal context${contextCount === 1 ? "" : "s"}`
+        : "Empty message";
+
+  return (
+    <li
+      className="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5"
+      data-testid="composer-queued-message-in-flight"
+    >
+      <Loader2Icon className="h-3.5 w-3.5 animate-spin text-primary" aria-hidden="true" />
+      <span
+        className={cn(
+          "min-w-0 flex-1 truncate text-sm",
+          !hasText && "italic text-muted-foreground",
+        )}
+        title={previewText}
+      >
+        {previewText}
+      </span>
+      <span className="text-[10px] uppercase tracking-[0.18em] text-primary/80">Sending</span>
+    </li>
   );
 });
 

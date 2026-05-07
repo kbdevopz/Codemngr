@@ -249,6 +249,10 @@ export function useQueueHeadIdForThread(threadKey: string): string | null {
   return useComposerQueueStore((store) => store.queueByThreadKey[threadKey]?.[0]?.id ?? null);
 }
 
+export function useInFlightEntryForThread(threadKey: string): QueuedMessageEntry | null {
+  return useComposerQueueStore((store) => store.inFlightByThreadKey[threadKey] ?? null);
+}
+
 const EMPTY_QUEUE: ReadonlyArray<QueuedMessageEntry> = Object.freeze([]);
 
 export function newQueuedMessageId(): string {
