@@ -84,6 +84,12 @@ export interface DispatchPayload {
   sendEnvMode?: DraftThreadEnvMode;
   /** Branch chosen for new worktrees. */
   activeThreadBranch?: string | null;
+  /**
+   * For plan follow-ups: links the new turn back to the proposed plan so
+   * the server can attribute the implementation work. Pass undefined for
+   * regular sends.
+   */
+  sourceProposedPlan?: { threadId: ThreadId; planId: string };
 }
 
 export type DispatchOptimisticAttachment = {
@@ -303,6 +309,7 @@ export async function dispatchUserMessage(
       runtimeMode: payload.runtimeMode,
       interactionMode: payload.interactionMode,
       ...(bootstrap ? { bootstrap } : {}),
+      ...(payload.sourceProposedPlan ? { sourceProposedPlan: payload.sourceProposedPlan } : {}),
       createdAt: messageCreatedAt,
     });
     turnStartSucceeded = true;

@@ -1954,60 +1954,6 @@ export default function ChatView(props: ChatViewProps) {
       activePlan?.turnId ?? sidebarProposedPlan?.turnId ?? "__dismissed__";
   }, [activePlan?.turnId, sidebarProposedPlan?.turnId]);
 
-  const persistThreadSettingsForNextTurn = useCallback(
-    async (input: {
-      threadId: ThreadId;
-      createdAt: string;
-      modelSelection?: ModelSelection;
-      runtimeMode: RuntimeMode;
-      interactionMode: ProviderInteractionMode;
-    }) => {
-      if (!serverThread) {
-        return;
-      }
-      const api = readEnvironmentApi(environmentId);
-      if (!api) {
-        return;
-      }
-
-      if (
-        input.modelSelection !== undefined &&
-        (input.modelSelection.model !== serverThread.modelSelection.model ||
-          input.modelSelection.instanceId !== serverThread.modelSelection.instanceId ||
-          JSON.stringify(input.modelSelection.options ?? null) !==
-            JSON.stringify(serverThread.modelSelection.options ?? null))
-      ) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.meta.update",
-          commandId: newCommandId(),
-          threadId: input.threadId,
-          modelSelection: input.modelSelection,
-        });
-      }
-
-      if (input.runtimeMode !== serverThread.runtimeMode) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.runtime-mode.set",
-          commandId: newCommandId(),
-          threadId: input.threadId,
-          runtimeMode: input.runtimeMode,
-          createdAt: input.createdAt,
-        });
-      }
-
-      if (input.interactionMode !== serverThread.interactionMode) {
-        await api.orchestration.dispatchCommand({
-          type: "thread.interaction-mode.set",
-          commandId: newCommandId(),
-          threadId: input.threadId,
-          interactionMode: input.interactionMode,
-          createdAt: input.createdAt,
-        });
-      }
-    },
-    [environmentId, serverThread],
-  );
-
   // Scroll helpers — LegendList handles auto-scroll via maintainScrollAtEnd.
   const scrollToEnd = useCallback((animated = false) => {
     legendListRef.current?.scrollToEnd?.({ animated });
@@ -2982,9 +2928,7 @@ export default function ChatView(props: ChatViewProps) {
       text: string;
       interactionMode: "default" | "plan";
     }) => {
-      const api = readEnvironmentApi(environmentId);
       if (
-        !api ||
         !activeThread ||
         !isServerThread ||
         isSendBusy ||
@@ -2993,84 +2937,27 @@ export default function ChatView(props: ChatViewProps) {
       ) {
         return;
       }
-
       const trimmed = text.trim();
-      if (!trimmed) {
-        return;
-      }
-
+      if (!trimmed) return;
       const sendCtx = composerRef.current?.getSendContext();
-      if (!sendCtx) {
-        return;
-      }
-      const {
-        selectedProvider: ctxSelectedProvider,
-        selectedModel: ctxSelectedModel,
-        selectedProviderModels: ctxSelectedProviderModels,
-        selectedPromptEffort: ctxSelectedPromptEffort,
-        selectedModelSelection: ctxSelectedModelSelection,
-      } = sendCtx;
+      if (!sendCtx) return;
 
-      const threadIdForSend = activeThread.id;
-      const messageIdForSend = newMessageId();
-      const messageCreatedAt = new Date().toISOString();
-      const outgoingMessageText = formatOutgoingPrompt({
-        provider: ctxSelectedProvider,
-        model: ctxSelectedModel,
-        models: ctxSelectedProviderModels,
-        effort: ctxSelectedPromptEffort,
-        text: trimmed,
-      });
-
-      sendInFlightRef.current = true;
-      beginLocalDispatch({ preparingWorktree: false });
-      setThreadError(threadIdForSend, null);
-
-      await pinTimelineToBottomBeforeSend();
-
-      setOptimisticUserMessages((existing) => [
-        ...existing,
+      const linkSourcePlan = nextInteractionMode === "default" && activeProposedPlan;
+      const result = await dispatchActiveThreadMessage(
         {
-          id: messageIdForSend,
-          role: "user",
-          text: outgoingMessageText,
-          createdAt: messageCreatedAt,
-          streaming: false,
-        },
-      ]);
-      scrollToEndOnNextFrame();
-
-      try {
-        await persistThreadSettingsForNextTurn({
-          threadId: threadIdForSend,
-          createdAt: messageCreatedAt,
-          modelSelection: ctxSelectedModelSelection,
+          text: trimmed,
+          trimmed,
+          images: [],
+          terminalContexts: [],
+          expiredTerminalContextCount: 0,
+          selectedModelSelection: sendCtx.selectedModelSelection,
+          selectedProvider: sendCtx.selectedProvider,
+          selectedModel: sendCtx.selectedModel,
+          selectedProviderModels: sendCtx.selectedProviderModels,
+          selectedPromptEffort: sendCtx.selectedPromptEffort,
           runtimeMode,
           interactionMode: nextInteractionMode,
-        });
-
-        // Keep the mode toggle and plan-follow-up banner in sync immediately
-        // while the same-thread implementation turn is starting.
-        setComposerDraftInteractionMode(
-          scopeThreadRef(activeThread.environmentId, threadIdForSend),
-          nextInteractionMode,
-        );
-
-        await api.orchestration.dispatchCommand({
-          type: "thread.turn.start",
-          commandId: newCommandId(),
-          threadId: threadIdForSend,
-          message: {
-            messageId: messageIdForSend,
-            role: "user",
-            text: outgoingMessageText,
-            attachments: [],
-          },
-          modelSelection: ctxSelectedModelSelection,
-          titleSeed: activeThread.title,
-          runtimeMode,
-          interactionMode: nextInteractionMode,
-          ...(nextInteractionMode === "default" && activeProposedPlan
+          ...(linkSourcePlan
             ? {
                 sourceProposedPlan: {
                   threadId: activeThread.id,
@@ -3078,44 +2965,55 @@ export default function ChatView(props: ChatViewProps) {
                 },
               }
             : {}),
-          createdAt: messageCreatedAt,
-        });
-        // Optimistically open the plan sidebar when implementing (not refining).
-        // "default" mode here means the agent is executing the plan, which produces
-        // step-tracking activities that the sidebar will display.
-        if (nextInteractionMode === "default" && autoOpenPlanSidebar) {
-          planSidebarDismissedForTurnRef.current = null;
-          setPlanSidebarOpen(true);
-        }
-        sendInFlightRef.current = false;
-      } catch (err) {
-        setOptimisticUserMessages((existing) =>
-          existing.filter((message) => message.id !== messageIdForSend),
-        );
-        setThreadError(
-          threadIdForSend,
-          err instanceof Error ? err.message : "Failed to send plan follow-up.",
-        );
-        sendInFlightRef.current = false;
-        resetLocalDispatch();
+        },
+        {
+          async onBeforeDispatch({ messageIdForSend, messageCreatedAt, outgoingMessageText }) {
+            await pinTimelineToBottomBeforeSend();
+            setOptimisticUserMessages((existing) => [
+              ...existing,
+              {
+                id: messageIdForSend,
+                role: "user",
+                text: outgoingMessageText,
+                createdAt: messageCreatedAt,
+                streaming: false,
+              },
+            ]);
+            scrollToEndOnNextFrame();
+            // Keep the mode toggle + plan-follow-up banner in sync immediately
+            // while the same-thread implementation turn is starting.
+            setComposerDraftInteractionMode(
+              scopeThreadRef(activeThread.environmentId, activeThread.id),
+              nextInteractionMode,
+            );
+          },
+          onDispatchError({ messageIdForSend }) {
+            setOptimisticUserMessages((existing) =>
+              existing.filter((message) => message.id !== messageIdForSend),
+            );
+          },
+        },
+      );
+
+      if (result.ok && nextInteractionMode === "default" && autoOpenPlanSidebar) {
+        // "default" mode here means the agent is executing the plan, which
+        // produces step-tracking activities that the sidebar will display.
+        planSidebarDismissedForTurnRef.current = null;
+        setPlanSidebarOpen(true);
       }
     },
     [
       activeThread,
       activeProposedPlan,
-      beginLocalDispatch,
+      autoOpenPlanSidebar,
+      dispatchActiveThreadMessage,
       isConnecting,
       isSendBusy,
       isServerThread,
-      persistThreadSettingsForNextTurn,
-      resetLocalDispatch,
-      runtimeMode,
-      setComposerDraftInteractionMode,
-      setThreadError,
-      autoOpenPlanSidebar,
-      environmentId,
       pinTimelineToBottomBeforeSend,
+      runtimeMode,
       scrollToEndOnNextFrame,
+      setComposerDraftInteractionMode,
     ],
   );
 
