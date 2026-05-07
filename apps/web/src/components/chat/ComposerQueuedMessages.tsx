@@ -33,30 +33,19 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   const clearForThread = useComposerQueueStore((store) => store.clearForThread);
   const reorder = useComposerQueueStore((store) => store.reorder);
 
-  const handleRemove = useCallback(
-    (entryId: string) => () => {
-      removeEntry(threadKey, entryId);
-    },
+  // Stable per-row handlers: row props don't churn just because the parent
+  // re-renders, so QueuedMessageRow's memo actually buys re-render skipping.
+  const handleRemoveById = useCallback(
+    (entryId: string) => removeEntry(threadKey, entryId),
     [removeEntry, threadKey],
   );
-
+  const handleMoveByIndex = useCallback(
+    (fromIndex: number, delta: number) => reorder(threadKey, fromIndex, fromIndex + delta),
+    [reorder, threadKey],
+  );
   const handleClearAll = useCallback(() => {
     clearForThread(threadKey);
   }, [clearForThread, threadKey]);
-
-  const handleMove = useCallback(
-    (fromIndex: number, delta: number) => () => {
-      reorder(threadKey, fromIndex, fromIndex + delta);
-    },
-    [reorder, threadKey],
-  );
-
-  const handleEdit = useCallback(
-    (entry: QueuedMessageEntry) => () => {
-      onEditEntry?.(entry);
-    },
-    [onEditEntry],
-  );
 
   const totalCount = queue.length + (inFlightEntry ? 1 : 0);
   if (totalCount === 0) {
@@ -95,10 +84,9 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
             position={index + 1}
             isFirst={index === 0}
             isLast={index === queue.length - 1}
-            onRemove={handleRemove(entry.id)}
-            onMoveUp={handleMove(index, -1)}
-            onMoveDown={handleMove(index, 1)}
-            {...(onEditEntry ? { onEdit: handleEdit(entry) } : {})}
+            onRemoveById={handleRemoveById}
+            onMoveByIndex={handleMoveByIndex}
+            {...(onEditEntry ? { onEditEntry } : {})}
           />
         ))}
       </ul>
@@ -106,22 +94,34 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   );
 });
 
+function getQueuedEntryPreview(entry: QueuedMessageEntry): {
+  text: string;
+  isPlaceholder: boolean;
+} {
+  if (entry.text.length > 0) return { text: entry.text, isPlaceholder: false };
+  const imageCount = entry.images?.length ?? 0;
+  if (imageCount > 0) {
+    return {
+      text: `${imageCount} image${imageCount === 1 ? "" : "s"}`,
+      isPlaceholder: true,
+    };
+  }
+  const contextCount = entry.terminalContexts?.length ?? 0;
+  if (contextCount > 0) {
+    return {
+      text: `${contextCount} terminal context${contextCount === 1 ? "" : "s"}`,
+      isPlaceholder: true,
+    };
+  }
+  return { text: "Empty message", isPlaceholder: true };
+}
+
 const InFlightMessageRow = memo(function InFlightMessageRow({
   entry,
 }: {
   entry: QueuedMessageEntry;
 }) {
-  const imageCount = entry.images?.length ?? 0;
-  const contextCount = entry.terminalContexts?.length ?? 0;
-  const hasText = entry.text.length > 0;
-  const previewText = hasText
-    ? entry.text
-    : imageCount > 0
-      ? `${imageCount} image${imageCount === 1 ? "" : "s"}`
-      : contextCount > 0
-        ? `${contextCount} terminal context${contextCount === 1 ? "" : "s"}`
-        : "Empty message";
-
+  const preview = getQueuedEntryPreview(entry);
   return (
     <li
       className="flex items-center gap-2 rounded-md border border-primary/40 bg-primary/5 px-2.5 py-1.5"
@@ -131,11 +131,11 @@ const InFlightMessageRow = memo(function InFlightMessageRow({
       <span
         className={cn(
           "min-w-0 flex-1 truncate text-sm",
-          !hasText && "italic text-muted-foreground",
+          preview.isPlaceholder && "italic text-muted-foreground",
         )}
-        title={previewText}
+        title={preview.text}
       >
-        {previewText}
+        {preview.text}
       </span>
       <span className="text-[10px] uppercase tracking-[0.18em] text-primary/80">Sending</span>
     </li>
@@ -147,10 +147,9 @@ interface QueuedMessageRowProps {
   position: number;
   isFirst: boolean;
   isLast: boolean;
-  onRemove: () => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
-  onEdit?: () => void;
+  onRemoveById: (id: string) => void;
+  onMoveByIndex: (fromIndex: number, delta: number) => void;
+  onEditEntry?: (entry: QueuedMessageEntry) => void;
 }
 
 const QueuedMessageRow = memo(function QueuedMessageRow({
@@ -158,21 +157,27 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
   position,
   isFirst,
   isLast,
-  onRemove,
-  onMoveUp,
-  onMoveDown,
-  onEdit,
+  onRemoveById,
+  onMoveByIndex,
+  onEditEntry,
 }: QueuedMessageRowProps) {
+  const preview = getQueuedEntryPreview(entry);
   const imageCount = entry.images?.length ?? 0;
   const contextCount = entry.terminalContexts?.length ?? 0;
-  const hasText = entry.text.length > 0;
-  const previewText = hasText
-    ? entry.text
-    : imageCount > 0
-      ? `${imageCount} image${imageCount === 1 ? "" : "s"}`
-      : contextCount > 0
-        ? `${contextCount} terminal context${contextCount === 1 ? "" : "s"}`
-        : "Empty message";
+
+  const fromIndex = position - 1;
+  const handleMoveUp = useCallback(() => {
+    onMoveByIndex(fromIndex, -1);
+  }, [onMoveByIndex, fromIndex]);
+  const handleMoveDown = useCallback(() => {
+    onMoveByIndex(fromIndex, 1);
+  }, [onMoveByIndex, fromIndex]);
+  const handleRemove = useCallback(() => {
+    onRemoveById(entry.id);
+  }, [onRemoveById, entry.id]);
+  const handleEdit = useCallback(() => {
+    onEditEntry?.(entry);
+  }, [onEditEntry, entry]);
 
   return (
     <li
@@ -185,11 +190,11 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
       <span
         className={cn(
           "min-w-0 flex-1 truncate text-sm",
-          !hasText && "italic text-muted-foreground",
+          preview.isPlaceholder && "italic text-muted-foreground",
         )}
-        title={previewText}
+        title={preview.text}
       >
-        {previewText}
+        {preview.text}
       </span>
       {imageCount > 0 && (
         <span
@@ -212,7 +217,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
       <div className="flex items-center gap-0.5 opacity-60 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
         <button
           type="button"
-          onClick={onMoveUp}
+          onClick={handleMoveUp}
           disabled={isFirst}
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
           aria-label="Move up"
@@ -221,17 +226,17 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
         </button>
         <button
           type="button"
-          onClick={onMoveDown}
+          onClick={handleMoveDown}
           disabled={isLast}
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-30 disabled:hover:bg-transparent"
           aria-label="Move down"
         >
           <ArrowDownIcon className="h-3.5 w-3.5" />
         </button>
-        {onEdit && (
+        {onEditEntry && (
           <button
             type="button"
-            onClick={onEdit}
+            onClick={handleEdit}
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label="Edit queued message"
             title="Edit — restores to the composer and removes from the queue"
@@ -241,7 +246,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
         )}
         <button
           type="button"
-          onClick={onRemove}
+          onClick={handleRemove}
           className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
           aria-label="Remove queued message"
         >

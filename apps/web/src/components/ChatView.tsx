@@ -27,7 +27,6 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime";
-import { applyClaudePromptEffortPrefix, resolvePromptInjectedEffort } from "@t3tools/shared/model";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { truncate } from "@t3tools/shared/String";
 import { Debouncer } from "@tanstack/react-pacer";
@@ -110,7 +109,7 @@ import {
   projectScriptIdFromCommand,
 } from "~/projectScripts";
 import { newCommandId, newDraftId, newMessageId, newThreadId } from "~/lib/utils";
-import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
+import { resolveSelectableProvider } from "../providerModels";
 import { useSettings } from "../hooks/useSettings";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -135,6 +134,7 @@ import {
   useComposerQueueStore,
   useQueueHeadIdForThread,
 } from "../composerQueueStore";
+import { surfaceDroppedQueueEntry } from "../hooks/useBackgroundQueueFlusher";
 import {
   isTerminalContextExpired,
   type TerminalContextDraft,
@@ -171,6 +171,7 @@ import {
   PullRequestDialogState,
   cloneComposerImageForRetry,
   deriveLockedProvider,
+  formatOutgoingPrompt,
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
   resolveSendEnvMode,
@@ -310,17 +311,6 @@ function useThreadPlanCatalog(threadIds: readonly ThreadId[]): ThreadPlanCatalog
   );
 }
 
-function formatOutgoingPrompt(params: {
-  provider: ProviderDriverKind;
-  model: string | null;
-  models: ReadonlyArray<ServerProvider["models"][number]>;
-  effort: string | null;
-  text: string;
-}): string {
-  const caps = getProviderModelCapabilities(params.models, params.model, params.provider);
-  const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
-  return applyClaudePromptEffortPrefix(params.text, promptEffort);
-}
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 
@@ -1977,16 +1967,60 @@ export default function ChatView(props: ChatViewProps) {
     });
   }, []);
 
-  // MVP message queueing: while a turn is running, plain-text submits are
-  // pushed onto a per-thread queue; we flush one entry at a time when
-  // latestTurnSettled flips back to true. The send pipeline still
-  // refuses sends with attachments / terminal contexts during a turn,
-  // since queueing those requires a snapshot-driven dispatch refactor.
+  // While a turn is running, submits go onto a per-thread queue; the
+  // flush effect dispatches one entry per latestTurnSettled transition.
   const enqueueComposerMessage = useComposerQueueStore((store) => store.enqueue);
   const beginQueuedDispatch = useComposerQueueStore((store) => store.beginInFlight);
   const completeQueuedDispatch = useComposerQueueStore((store) => store.completeInFlight);
   const removeQueuedMessage = useComposerQueueStore((store) => store.removeEntry);
   const queueHeadId = useQueueHeadIdForThread(routeThreadKey);
+
+  // Writes a (text, images, contexts, optional modes) snapshot back into
+  // the composer refs and draft store, then resets the cursor. Shared by
+  // the dispatch retry-restore path and the edit-queued-entry path.
+  const restoreComposerSnapshot = useCallback(
+    (snapshot: {
+      text: string;
+      images: ComposerImageAttachment[];
+      terminalContexts: TerminalContextDraft[];
+      modelSelection?: ModelSelection;
+      runtimeMode?: RuntimeMode;
+      interactionMode?: ProviderInteractionMode;
+      detectTrigger: boolean;
+    }) => {
+      promptRef.current = snapshot.text;
+      composerImagesRef.current = snapshot.images;
+      composerTerminalContextsRef.current = snapshot.terminalContexts;
+      if (snapshot.modelSelection) {
+        setComposerDraftModelSelection(composerDraftTarget, snapshot.modelSelection);
+      }
+      if (snapshot.runtimeMode) {
+        setComposerDraftRuntimeMode(composerDraftTarget, snapshot.runtimeMode);
+      }
+      if (snapshot.interactionMode) {
+        setComposerDraftInteractionMode(composerDraftTarget, snapshot.interactionMode);
+      }
+      setComposerDraftPrompt(composerDraftTarget, snapshot.text);
+      if (snapshot.images.length > 0) {
+        addComposerDraftImages(composerDraftTarget, snapshot.images);
+      }
+      setComposerDraftTerminalContexts(composerDraftTarget, snapshot.terminalContexts);
+      composerRef.current?.resetCursorState({
+        cursor: collapseExpandedComposerCursor(snapshot.text, snapshot.text.length),
+        prompt: snapshot.text,
+        detectTrigger: snapshot.detectTrigger,
+      });
+    },
+    [
+      addComposerDraftImages,
+      composerDraftTarget,
+      setComposerDraftInteractionMode,
+      setComposerDraftModelSelection,
+      setComposerDraftPrompt,
+      setComposerDraftRuntimeMode,
+      setComposerDraftTerminalContexts,
+    ],
+  );
   const onSendRef = useRef<((e?: { preventDefault: () => void }) => Promise<void>) | null>(null);
 
   // Debounce *showing* the scroll-to-bottom pill so it doesn't flash during
@@ -2624,16 +2658,10 @@ export default function ChatView(props: ChatViewProps) {
               const next = existing.filter((message) => message.id !== messageIdForSend);
               return next.length === existing.length ? existing : next;
             });
-            promptRef.current = payload.text;
-            const retryComposerImages = payload.images.map(cloneComposerImageForRetry);
-            composerImagesRef.current = retryComposerImages;
-            composerTerminalContextsRef.current = [...payload.terminalContexts];
-            setComposerDraftPrompt(composerDraftTarget, payload.text);
-            addComposerDraftImages(composerDraftTarget, retryComposerImages);
-            setComposerDraftTerminalContexts(composerDraftTarget, [...payload.terminalContexts]);
-            composerRef.current?.resetCursorState({
-              cursor: collapseExpandedComposerCursor(payload.text, payload.text.length),
-              prompt: payload.text,
+            restoreComposerSnapshot({
+              text: payload.text,
+              images: payload.images.map(cloneComposerImageForRetry),
+              terminalContexts: [...payload.terminalContexts],
               detectTrigger: true,
             });
           }
@@ -2694,18 +2722,7 @@ export default function ChatView(props: ChatViewProps) {
         interactionMode: taken.interactionMode ?? interactionMode,
       });
       const completion = completeQueuedDispatch(routeThreadKey, result.ok);
-      if (completion.droppedAfterRetries) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Queued message dropped after repeated failures",
-            description:
-              completion.droppedAfterRetries.text.length > 0
-                ? completion.droppedAfterRetries.text
-                : "Message had no text. Re-queue from history if needed.",
-          }),
-        );
-      }
+      surfaceDroppedQueueEntry(completion.droppedAfterRetries);
     });
   }, [
     queueHeadId,
@@ -2723,49 +2740,24 @@ export default function ChatView(props: ChatViewProps) {
     interactionMode,
   ]);
 
-  // Restore a queued entry back into the composer so the user can edit it.
-  // Removes the entry from the queue; the user's existing draft (if any) is
-  // overwritten — same trade-off as composerDraftStore's retry restore path.
+  // Pop a queued entry back into the composer for editing; the user's
+  // existing draft (if any) is overwritten, same trade-off as the
+  // dispatch-retry restore.
   const onEditQueuedEntry = useCallback(
     (entry: QueuedMessageEntry) => {
-      const hydratedImages = entry.images ? hydrateImagesFromPersisted(entry.images) : [];
-      const queuedTerminalContexts = [...(entry.terminalContexts ?? [])];
-      promptRef.current = entry.text;
-      composerImagesRef.current = hydratedImages;
-      composerTerminalContextsRef.current = queuedTerminalContexts;
-      if (entry.modelSelection) {
-        setComposerDraftModelSelection(composerDraftTarget, entry.modelSelection);
-      }
-      if (entry.runtimeMode) {
-        setComposerDraftRuntimeMode(composerDraftTarget, entry.runtimeMode);
-      }
-      if (entry.interactionMode) {
-        setComposerDraftInteractionMode(composerDraftTarget, entry.interactionMode);
-      }
-      setComposerDraftPrompt(composerDraftTarget, entry.text);
-      if (hydratedImages.length > 0) {
-        addComposerDraftImages(composerDraftTarget, hydratedImages);
-      }
-      setComposerDraftTerminalContexts(composerDraftTarget, queuedTerminalContexts);
-      composerRef.current?.resetCursorState({
-        cursor: collapseExpandedComposerCursor(entry.text, entry.text.length),
-        prompt: entry.text,
+      restoreComposerSnapshot({
+        text: entry.text,
+        images: entry.images ? hydrateImagesFromPersisted(entry.images) : [],
+        terminalContexts: [...(entry.terminalContexts ?? [])],
+        ...(entry.modelSelection ? { modelSelection: entry.modelSelection } : {}),
+        ...(entry.runtimeMode ? { runtimeMode: entry.runtimeMode } : {}),
+        ...(entry.interactionMode ? { interactionMode: entry.interactionMode } : {}),
         detectTrigger: false,
       });
       composerRef.current?.focusAtEnd();
       removeQueuedMessage(routeThreadKey, entry.id);
     },
-    [
-      addComposerDraftImages,
-      composerDraftTarget,
-      removeQueuedMessage,
-      routeThreadKey,
-      setComposerDraftInteractionMode,
-      setComposerDraftModelSelection,
-      setComposerDraftPrompt,
-      setComposerDraftRuntimeMode,
-      setComposerDraftTerminalContexts,
-    ],
+    [removeQueuedMessage, restoreComposerSnapshot, routeThreadKey],
   );
 
   const onInterrupt = async () => {

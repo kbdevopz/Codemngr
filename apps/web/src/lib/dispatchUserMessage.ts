@@ -13,11 +13,7 @@ import {
 import { scopeProjectRef } from "@t3tools/client-runtime";
 import { truncate } from "@t3tools/shared/String";
 import { buildTemporaryWorktreeBranchName } from "@t3tools/shared/git";
-import {
-  applyClaudePromptEffortPrefix,
-  createModelSelection,
-  resolvePromptInjectedEffort,
-} from "@t3tools/shared/model";
+import { createModelSelection } from "@t3tools/shared/model";
 import { newCommandId, newMessageId } from "./utils";
 import { readEnvironmentApi } from "../environmentApi";
 import { useStore, selectProjectByRef, selectThreadByRef } from "../store";
@@ -28,41 +24,12 @@ import {
   type TerminalContextDraft,
 } from "./terminalContext";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { buildExpiredTerminalContextToastCopy } from "../components/ChatView.logic";
-import { getProviderModelCapabilities } from "../providerModels";
-
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
-
-async function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("error", () =>
-      reject(reader.error ?? new Error("Failed to read file")),
-    );
-    reader.addEventListener("load", () => {
-      const result = reader.result;
-      if (typeof result === "string") {
-        resolve(result);
-      } else {
-        reject(new Error("Unexpected FileReader result"));
-      }
-    });
-    reader.readAsDataURL(file);
-  });
-}
-
-function formatOutgoingPrompt(params: {
-  provider: ProviderDriverKind;
-  model: string | null;
-  models: ReadonlyArray<ServerProvider["models"][number]>;
-  effort: string | null;
-  text: string;
-}): string {
-  const caps = getProviderModelCapabilities(params.models, params.model, params.provider);
-  const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
-  return applyClaudePromptEffortPrefix(params.text, promptEffort);
-}
+import {
+  buildExpiredTerminalContextToastCopy,
+  formatOutgoingPrompt,
+  IMAGE_ONLY_BOOTSTRAP_PROMPT,
+  readFileAsDataUrl,
+} from "../components/ChatView.logic";
 
 export interface DispatchPayload {
   threadRef: ScopedThreadRef;

@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
-import { useShallow } from "zustand/react/shallow";
 import type { ModelSelection, ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 import type { PersistedComposerImageAttachment } from "./composerDraftStore";
@@ -263,9 +262,7 @@ export const useComposerQueueStore = create<ComposerQueueStoreState>()(
 );
 
 export function useQueuedMessagesForThread(threadKey: string): ReadonlyArray<QueuedMessageEntry> {
-  return useComposerQueueStore(
-    useShallow((store) => store.queueByThreadKey[threadKey] ?? EMPTY_QUEUE),
-  );
+  return useComposerQueueStore((store) => store.queueByThreadKey[threadKey] ?? EMPTY_QUEUE);
 }
 
 export function useQueueHeadIdForThread(threadKey: string): string | null {
