@@ -1,6 +1,13 @@
 "use client";
 
-import { ChevronDownIcon, PlusIcon, Trash2Icon, XIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ClipboardCopyIcon,
+  KeyRoundIcon,
+  PlusIcon,
+  Trash2Icon,
+  XIcon,
+} from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   isProviderDriverKind,
@@ -19,6 +26,7 @@ import { Button } from "../ui/button";
 import { Collapsible, CollapsibleContent } from "../ui/collapsible";
 import { DraftInput } from "../ui/draft-input";
 import { Switch } from "../ui/switch";
+import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
@@ -78,6 +86,48 @@ function readConfigStringArray(config: unknown, key: string): ReadonlyArray<stri
   const value = (config as Record<string, unknown>)[key];
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function readConfigString(config: unknown, key: string): string {
+  if (config === null || typeof config !== "object") return "";
+  const value = (config as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : "";
+}
+
+function shellEscape(value: string): string {
+  if (value.length === 0) return "''";
+  if (/^[a-zA-Z0-9_./~@%+=:,-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+interface LoginCommand {
+  envName: "CLAUDE_CONFIG_DIR" | "CODEX_HOME";
+  command: string;
+}
+
+function buildLoginCommand(
+  driverKind: ProviderDriverKind | null,
+  config: unknown,
+): LoginCommand | null {
+  if (driverKind === "claudeAgent") {
+    const homePath = readConfigString(config, "homePath");
+    const binary = readConfigString(config, "binaryPath") || "claude";
+    const envPart = homePath ? `CLAUDE_CONFIG_DIR=${shellEscape(homePath)} ` : "";
+    return {
+      envName: "CLAUDE_CONFIG_DIR",
+      command: `${envPart}${shellEscape(binary)} /login`,
+    };
+  }
+  if (driverKind === "codex") {
+    const homePath = readConfigString(config, "homePath");
+    const binary = readConfigString(config, "binaryPath") || "codex";
+    const envPart = homePath ? `CODEX_HOME=${shellEscape(homePath)} ` : "";
+    return {
+      envName: "CODEX_HOME",
+      command: `${envPart}${shellEscape(binary)} login`,
+    };
+  }
+  return null;
 }
 
 /**
@@ -372,6 +422,69 @@ function ProviderEnvironmentSection(props: {
       <span className="text-xs text-muted-foreground">
         Sensitive values are stored separately and are not returned to the app after saving.
       </span>
+    </div>
+  );
+}
+
+function ProviderSignInPanel(props: {
+  readonly driverKind: ProviderDriverKind | null;
+  readonly config: unknown;
+}) {
+  const loginCommand = buildLoginCommand(props.driverKind, props.config);
+  if (!loginCommand) return null;
+
+  const handleCopy = () => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      toastManager.add({
+        type: "error",
+        title: "Clipboard not available",
+        description: "Copy the command from the field manually.",
+      });
+      return;
+    }
+    void navigator.clipboard
+      .writeText(loginCommand.command)
+      .then(() => {
+        toastManager.add({
+          type: "success",
+          title: "Command copied",
+          description: "Run it in a terminal to sign in to this account.",
+        });
+      })
+      .catch(() => {
+        toastManager.add({
+          type: "error",
+          title: "Could not copy",
+          description: "Copy the command from the field manually.",
+        });
+      });
+  };
+
+  return (
+    <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+      <div className="flex items-center gap-2">
+        <KeyRoundIcon className="size-4 text-muted-foreground" aria-hidden="true" />
+        <span className="text-xs font-medium text-foreground">Sign in</span>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Run this command in a terminal to authenticate this account. The{" "}
+        <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">
+          {loginCommand.envName}
+        </code>{" "}
+        env var scopes the credentials to this instance's home directory; nothing else changes.
+      </p>
+      <div className="mt-2 flex items-center gap-2">
+        <code
+          className="min-w-0 flex-1 truncate rounded border border-border/60 bg-muted/40 px-2 py-1.5 font-mono text-xs"
+          title={loginCommand.command}
+        >
+          {loginCommand.command}
+        </code>
+        <Button type="button" size="sm" variant="outline" onClick={handleCopy} className="shrink-0">
+          <ClipboardCopyIcon className="size-3.5" aria-hidden="true" />
+          Copy
+        </Button>
+      </div>
     </div>
   );
 }
@@ -692,6 +805,8 @@ export function ProviderInstanceCard({
                 onChange={updateConfig}
               />
             ) : null}
+
+            <ProviderSignInPanel driverKind={driverKind} config={instance.config} />
 
             {driverOption !== undefined ? (
               <ProviderModelsSection

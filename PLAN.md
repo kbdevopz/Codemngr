@@ -18,7 +18,7 @@ Build a desktop GUI at **codemngr.com** that does what T3 Code does (multi-pane 
 - **Midwest Machinery** (client)
 - **Personal** (side projects)
 
-Mixing them across projects is a billing/compliance/trust-boundary problem. Codemngr makes "this project uses *that* account" the core abstraction — every session in a project automatically uses the right credentials, with multiple accounts running **simultaneously** in different panes.
+Mixing them across projects is a billing/compliance/trust-boundary problem. Codemngr makes "this project uses _that_ account" the core abstraction — every session in a project automatically uses the right credentials, with multiple accounts running **simultaneously** in different panes.
 
 Differentiator vs. T3 Code: explicit multi-account UI and lifecycle. Differentiator vs. Jean Claude: GUI, multi-provider (Claude + OpenAI to start), shared-settings model, and detection of existing logins.
 
@@ -33,6 +33,7 @@ The pre-implementation research (cloned both repos, deep-dived their code) produ
 T3 Code's provider layer was built around a `ProviderInstance` abstraction, not "the singleton Claude account." The architecture supports any number of instances per driver, each with its own config directory. Currently the settings hydration only synthesizes one instance per driver from legacy `providers.<kind>` config blobs (backward compat), but the registry, drivers, and runtime all handle multi-instance natively.
 
 **Evidence (file:line):**
+
 - `packages/contracts/src/providerInstance.ts:114-138` — `ProviderInstance` carries its own `homePath` / `shadowHomePath` per instance
 - `apps/server/src/provider/Layers/ProviderInstanceRegistryHydration.ts:71-102` — current single-instance synthesis (the place that needs to change to enable multi-account UI)
 - `apps/server/src/provider/Layers/ProviderInstanceRegistryLive.ts:100-196` — registry materialization, fully multi-instance
@@ -45,6 +46,7 @@ T3 Code's provider layer was built around a `ProviderInstance` abstraction, not 
 Common assumption (and my own initial assumption): Jean Claude swaps `~/.claude` via symlinks. **Wrong.** It uses the `CLAUDE_CONFIG_DIR` environment variable — exactly the same mechanism T3 Code's `ClaudeProvider` uses internally. Each profile is a separate directory (`~/.claude-work`, `~/.claude-personal`); a shell alias sets `CLAUDE_CONFIG_DIR` per-profile.
 
 **Evidence (file:line):**
+
 - `src/lib/profiles.ts:187-189`:
   ```ts
   export function getShellAliasLine(profile: Profile): string {
@@ -52,7 +54,7 @@ Common assumption (and my own initial assumption): Jean Claude swaps `~/.claude`
   }
   ```
 
-Jean Claude *does* use symlinks, but only **inside** profile dirs to share `settings.json`, `hooks/`, `agents/`, `skills/`, `plugins/`, `keybindings.json` between profiles — so config travels but credentials don't. That's a useful pattern we can adopt.
+Jean Claude _does_ use symlinks, but only **inside** profile dirs to share `settings.json`, `hooks/`, `agents/`, `skills/`, `plugins/`, `keybindings.json` between profiles — so config travels but credentials don't. That's a useful pattern we can adopt.
 
 **Implication**: The two reference projects converge on the same mechanism. We pick `CLAUDE_CONFIG_DIR` (and `CODEX_HOME` for Codex) per process spawn — multiple accounts can run at the same time, no swap required.
 
@@ -60,12 +62,12 @@ Jean Claude *does* use symlinks, but only **inside** profile dirs to share `sett
 
 This was the user's specific question. Per-provider:
 
-| Provider | Detection method |
-|---|---|
-| **Claude** | (1) Probe `claude --version` (binary check). (2) If installed, spawn a Claude Agent SDK session that reads `init.account` → returns email, subscriptionType, tokenSource. Cached per `(binaryPath, homePath)`. Code: `apps/server/src/provider/Layers/ClaudeProvider.ts:445-625`, `apps/server/src/provider/Drivers/ClaudeHome.ts:8-27`. |
-| **Codex (OpenAI)** | Spawn `codex app-server` subprocess with `CODEX_HOME` env set, request `account/read` over IPC → returns account type (`apiKey` vs `chatgpt`), email, planType. Code: `apps/server/src/provider/Layers/CodexProvider.ts:245-495`. |
-| **Cursor** | ACP protocol session, async background probe. |
-| **OpenCode** | Spawns `opencode` server, HTTP probe; 401/403 → unauthenticated. |
+| Provider           | Detection method                                                                                                                                                                                                                                                                                                                         |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Claude**         | (1) Probe `claude --version` (binary check). (2) If installed, spawn a Claude Agent SDK session that reads `init.account` → returns email, subscriptionType, tokenSource. Cached per `(binaryPath, homePath)`. Code: `apps/server/src/provider/Layers/ClaudeProvider.ts:445-625`, `apps/server/src/provider/Drivers/ClaudeHome.ts:8-27`. |
+| **Codex (OpenAI)** | Spawn `codex app-server` subprocess with `CODEX_HOME` env set, request `account/read` over IPC → returns account type (`apiKey` vs `chatgpt`), email, planType. Code: `apps/server/src/provider/Layers/CodexProvider.ts:245-495`.                                                                                                        |
+| **Cursor**         | ACP protocol session, async background probe.                                                                                                                                                                                                                                                                                            |
+| **OpenCode**       | Spawns `opencode` server, HTTP probe; 401/403 → unauthenticated.                                                                                                                                                                                                                                                                         |
 
 The mechanism is **per-instance**, so once we expose multi-instance config in the settings, detection works per-account out of the box.
 
@@ -73,23 +75,24 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 
 ## 3. Architecture Decisions
 
-| Decision | Choice | Rationale |
-|---|---|---|
-| Fork base | T3 Code | Modern Effect-based monorepo; already multi-instance under the hood; Tauri/Electron desktop already wired up; supports Claude + Codex + Cursor + OpenCode out of the box. |
-| Multi-account mechanism | `CLAUDE_CONFIG_DIR` / `CODEX_HOME` per process | Allows parallel sessions. Same approach Jean Claude landed on independently. Better than symlink swap (single-active limitation). |
-| Account directory layout | `~/.codemngr/accounts/<provider>/<name>/` | Namespace by provider so we don't collide with anything in `~/.claude` / `~/.codex`. Each account is a self-contained config home. |
-| Existing-account detection | Reuse T3's per-instance probe; on first launch scan default homes (`~/.claude`, `~/.codex`) and offer to import as the first account. | T3 already has the probe. We just call it against multiple homes. |
-| Adding a new account | UI button → create new `homePath` dir → spawn `claude /login` (or `codex login`) in subprocess scoped to that dir → register as new `ProviderInstance`. | Minimal new code. Reuses Claude's / Codex's own login flow. |
-| Shared settings between accounts | Optional Jean-Claude-style symlinks for `settings.json`, `hooks/`, `agents/` etc. between profile dirs. | Lets users share configuration without sharing credentials. |
-| Cross-PC sync (v2) | Sync only the metadata (account names, labels, project→account assignments, optional shared settings) via codemngr.com backend. Never sync OAuth tokens. | OAuth tokens are device/session-bound; syncing them is a security and reliability footgun. List of accounts syncs; user logs in once per machine. |
-| Delivery | Desktop app (Tauri or Electron — T3 already has `apps/desktop`); codemngr.com is the marketing/download site. | Filesystem and CLI subprocess access required; pure web won't work. |
-| First-class providers | Claude (Anthropic) + Codex (OpenAI). Cursor and OpenCode inherited from T3 but not the focus. | User scoped down to those two on day one. |
+| Decision                         | Choice                                                                                                                                                   | Rationale                                                                                                                                                                 |
+| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fork base                        | T3 Code                                                                                                                                                  | Modern Effect-based monorepo; already multi-instance under the hood; Tauri/Electron desktop already wired up; supports Claude + Codex + Cursor + OpenCode out of the box. |
+| Multi-account mechanism          | `CLAUDE_CONFIG_DIR` / `CODEX_HOME` per process                                                                                                           | Allows parallel sessions. Same approach Jean Claude landed on independently. Better than symlink swap (single-active limitation).                                         |
+| Account directory layout         | `~/.codemngr/accounts/<provider>/<name>/`                                                                                                                | Namespace by provider so we don't collide with anything in `~/.claude` / `~/.codex`. Each account is a self-contained config home.                                        |
+| Existing-account detection       | Reuse T3's per-instance probe; on first launch scan default homes (`~/.claude`, `~/.codex`) and offer to import as the first account.                    | T3 already has the probe. We just call it against multiple homes.                                                                                                         |
+| Adding a new account             | UI button → create new `homePath` dir → spawn `claude /login` (or `codex login`) in subprocess scoped to that dir → register as new `ProviderInstance`.  | Minimal new code. Reuses Claude's / Codex's own login flow.                                                                                                               |
+| Shared settings between accounts | Optional Jean-Claude-style symlinks for `settings.json`, `hooks/`, `agents/` etc. between profile dirs.                                                  | Lets users share configuration without sharing credentials.                                                                                                               |
+| Cross-PC sync (v2)               | Sync only the metadata (account names, labels, project→account assignments, optional shared settings) via codemngr.com backend. Never sync OAuth tokens. | OAuth tokens are device/session-bound; syncing them is a security and reliability footgun. List of accounts syncs; user logs in once per machine.                         |
+| Delivery                         | Desktop app (Tauri or Electron — T3 already has `apps/desktop`); codemngr.com is the marketing/download site.                                            | Filesystem and CLI subprocess access required; pure web won't work.                                                                                                       |
+| First-class providers            | Claude (Anthropic) + Codex (OpenAI). Cursor and OpenCode inherited from T3 but not the focus.                                                            | User scoped down to those two on day one.                                                                                                                                 |
 
 ---
 
 ## 4. Plan Of Work
 
 ### Phase 0 — Done
+
 - [x] Clone T3 Code and Jean Claude as references
 - [x] Deep-dive both architectures (this document captures findings)
 - [x] Fork T3 Code into this repo with proper attribution
@@ -98,6 +101,7 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 - [x] `bun install --ignore-scripts` succeeds (Effect's `effect-language-service patch` step OOMs in the cloud env but is unrelated to the fork; will run fine on a workstation with Node 24.13.1)
 
 ### Phase 1 — Get the fork building & running locally on the MacBook
+
 1. Bootstrap the remote (first push from MacBook — see Section 5).
 2. Install Node 24.13.1 and Bun 1.3.9 via mise (`.mise.toml` already pinned).
 3. `bun install` (this time with scripts — the patch step needs a real workstation).
@@ -105,6 +109,7 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 5. Smoke-test: open a project, run a Claude session in one pane, confirm the account it picks up matches `~/.claude`.
 
 ### Phase 2 — Multi-account: surface what's already there
+
 **Goal**: Let the user create and switch between multiple Claude accounts via the UI without writing any new provider code.
 
 1. **Settings model**: ✅ Done in `6d2fec77`. `ProviderInstanceRegistryHydration.deriveProviderInstanceConfigMap` no longer synthesizes a phantom default entry when explicit instances exist for a driver. Tests cover legacy-only, explicit-only, multi-explicit, and mixed cases.
@@ -116,23 +121,27 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 5. **Project → account binding**: mechanism already in T3 (`project.defaultModelSelection.instanceId`); per-thread picker in the composer already lets the user pick instance + model. UI for setting a project-level default — see Session C below.
 
 ### Phase 3 — Detection of existing accounts (first-run import)
+
 1. On first launch, scan `~/.claude`, `~/.codex`, `~/.config/anthropic`, `~/.config/openai` — wherever Claude Code / Codex CLI store credentials.
 2. For each one found, run T3's existing probe to get the account email/sub.
 3. Show an import dialog: "We found these existing logins. Import as accounts?"
 4. Importing copies (or symlinks — TBD) the existing dir into `~/.codemngr/accounts/<provider>/<auto-named>/`.
 
 ### Phase 4 — Shared settings (Jean Claude pattern)
+
 1. UI to mark certain files (`settings.json`, `hooks/`, `agents/`) as "shared across these accounts."
 2. Implementation: a "main" settings dir at `~/.codemngr/shared/`; per-account dirs symlink the shared items in.
 3. Per-account override: user can promote a symlinked file to a real file (breaking the link for that account only).
 
 ### Phase 5 — Cross-PC sync (separate workstream)
+
 1. codemngr.com backend (probably an Effect-based RPC server, mirroring T3's stack) for syncing metadata only.
 2. Encryption: account metadata + project assignments encrypted with a user passphrase before upload.
-3. Per-machine: still log in to each account once. The *list* of accounts to log into syncs.
+3. Per-machine: still log in to each account once. The _list_ of accounts to log into syncs.
 4. OpenAI API keys (not OAuth) can optionally sync via the same encrypted vault.
 
 ### Phase 6 — Polish, branding, distribution
+
 1. Rename remaining `@t3tools/*` workspace packages → `@codemngr/*` (mass rename; left to last to keep upstream merges easy until needed).
 2. Replace T3 branding in the UI (logo, name, color scheme).
 3. Marketing site at codemngr.com — fork or rebuild `apps/marketing/`.
@@ -144,16 +153,16 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 
 Each row is a self-contained chunk that can be picked up by a fresh session without page-faulting on context. Sessions are independent unless **Depends on** says otherwise. "Effort" is rough planning, not a hard estimate.
 
-| ID | Title | Phase | Effort | Depends on | Deliverable |
-|---|---|---|---|---|---|
-| **A** | Claude login subprocess flow | 2.3 | 3–4 hr | — | Server RPC `provider.account.login(instanceId)` that spawns `claude /login` with `CLAUDE_CONFIG_DIR` set, streams stdout (the OAuth URL) to the client, refreshes the provider snapshot on completion. New "Sign in" button on the Claude instance card in settings. Toast on success/failure. Tests for the new RPC. |
-| **B** | Codex login subprocess flow | 2.4 | 1–2 hr | A | Mirror of Session A for Codex (`codex login`, `CODEX_HOME`). Mostly extracts a generic `spawnLoginCommand` helper from A and wires up the Codex driver. |
-| **C** | Project → account binding UI | 2.5 | 2–3 hr | — | Project settings dialog (extend the existing rename dialog or add a new one). Field: "Default model + account for new threads in this project" using the existing model picker. Wires into `project.meta.update` with `defaultModelSelection`. New thread creation reads from this default. Tests for the picker integration. |
-| **D** | First-run import scanner | 3 | 3–4 hr | — | Server-side scanner module that probes `~/.claude`, `~/.codex`, `~/.config/anthropic`, `~/.config/openai` and uses the existing T3 probe helpers to identify each. New first-run modal in the client showing detected logins with checkboxes. Importing copies the dir into `~/.codemngr/accounts/<provider>/<auto-named>/` and adds the `providerInstances` entry. |
-| **E** | Shared settings symlink layer | 4 | 3–4 hr | A or B | UI to mark `settings.json` / `hooks/` / `agents/` files as shared. Server-side helper that creates `~/.codemngr/shared/` and symlinks chosen files from each account's home into it. "Promote to local" button breaks the link for one account. |
-| **F1** | codemngr.com backend skeleton | 5 | 4–6 hr | — | Effect-based RPC server skeleton at the codemngr.com origin. Auth with passphrase-derived key. Endpoints: `accounts.list`, `accounts.upsert`, `projectAssignments.list`, `projectAssignments.upsert`. Encryption envelope with a libsodium-style sealed box. No actual sync logic yet. |
-| **F2** | Client sync wiring | 5 | 3–4 hr | F1 | Client-side reconciliation loop: pull on launch, push debounced on local changes, conflict resolution (last-write-wins per record). UI status indicator. |
-| **G** | Workspace + branding rename | 6 | 2–3 hr | every other session | Mass `@t3tools/*` → `@codemngr/*` rename across `package.json` workspaces, imports, CI configs. Replace T3 logo/name/colors in the UI. Update `apps/marketing/`. Done last so upstream merges stay easy until then. |
+| ID     | Title                         | Phase | Effort | Depends on          | Deliverable                                                                                                                                                                                                                                                                                                                                                         |
+| ------ | ----------------------------- | ----- | ------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **A**  | Claude login subprocess flow  | 2.3   | 3–4 hr | —                   | ⚠ Partial — copy-command MVP shipped. The instance card now renders a Sign-in section for Claude/Codex with the exact `CLAUDE_CONFIG_DIR=… claude /login` (or `CODEX_HOME=… codex login`) command and a Copy button. User runs it in their own terminal; on success the existing provider probe re-detects the credentials. Server-side auto-spawn + streaming stdout (the original A scope) is deferred to a later session — that needs a new RPC contract, server handler, and stream UI, which is bigger than copy-command. |
+| **B**  | Codex login subprocess flow   | 2.4   | 1–2 hr | A                   | ✅ Folded into A's copy-command MVP — same component covers both drivers. The full subprocess auto-spawn version still pending.                                                                                                                                                                                                                                                                                                                                                                                              |
+| **C**  | Project → account binding UI  | 2.5   | 2–3 hr | —                   | ✅ Done in `4e9f3bda`. Project rename dialog reframed as "Project settings" with a "Default account" select. Saving wires into `project.meta.update` with title + `defaultModelSelection`. Composer initial selection already falls back to `project.defaultModelSelection`.                                                                                        |
+| **D**  | First-run import scanner      | 3     | 3–4 hr | —                   | Server-side scanner module that probes `~/.claude`, `~/.codex`, `~/.config/anthropic`, `~/.config/openai` and uses the existing T3 probe helpers to identify each. New first-run modal in the client showing detected logins with checkboxes. Importing copies the dir into `~/.codemngr/accounts/<provider>/<auto-named>/` and adds the `providerInstances` entry. |
+| **E**  | Shared settings symlink layer | 4     | 3–4 hr | A or B              | UI to mark `settings.json` / `hooks/` / `agents/` files as shared. Server-side helper that creates `~/.codemngr/shared/` and symlinks chosen files from each account's home into it. "Promote to local" button breaks the link for one account.                                                                                                                     |
+| **F1** | codemngr.com backend skeleton | 5     | 4–6 hr | —                   | Effect-based RPC server skeleton at the codemngr.com origin. Auth with passphrase-derived key. Endpoints: `accounts.list`, `accounts.upsert`, `projectAssignments.list`, `projectAssignments.upsert`. Encryption envelope with a libsodium-style sealed box. No actual sync logic yet.                                                                              |
+| **F2** | Client sync wiring            | 5     | 3–4 hr | F1                  | Client-side reconciliation loop: pull on launch, push debounced on local changes, conflict resolution (last-write-wins per record). UI status indicator.                                                                                                                                                                                                            |
+| **G**  | Workspace + branding rename   | 6     | 2–3 hr | every other session | Mass `@t3tools/*` → `@codemngr/*` rename across `package.json` workspaces, imports, CI configs. Replace T3 logo/name/colors in the UI. Update `apps/marketing/`. Done last so upstream merges stay easy until then.                                                                                                                                                 |
 
 ### Recommended order
 
@@ -180,7 +189,7 @@ The cloud environment can clone but cannot `git push` (no GitHub credentials wir
 
 ### 5.1 One-shot bootstrap (run on Mac)
 
-```bash
+````bash
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -235,7 +244,7 @@ Early development. Forked from [T3 Code](https://github.com/pingdotgg/t3code) (M
 mise install   # installs pinned Node 24 + Bun 1.3.9
 bun install
 bun run dev
-```
+````
 
 ## Attribution
 
@@ -245,6 +254,7 @@ Multi-account design takes inspiration from Jean Claude by Mike Veerman, also MI
 EOF
 
 # 5. Commit the rebrand
+
 git add package.json .gitignore README.md
 git commit -m "fork(codemngr): rebrand from T3 Code as multi-account fork
 
@@ -261,18 +271,24 @@ the provider layer.
   for inspection, not tracked)"
 
 # 6. Add PLAN.md (this file). Easiest: download from the cloud session,
-#    or re-paste the contents. After this script runs, you'll need to
-#    `git add PLAN.md && git commit -m "docs: add PLAN.md"`.
+
+# or re-paste the contents. After this script runs, you'll need to
+
+# `git add PLAN.md && git commit -m "docs: add PLAN.md"`.
 
 # 7. Push everything
+
 git push -u origin claude/codemngr-multi-account-setup-msneX
 
 # 8. Set up dev environment
+
 mise install || echo "Install mise from https://mise.jdx.dev if you don't have it"
 bun install
 
 # 9. Smoke-test the dev server
+
 bun run dev
+
 ```
 
 ### 5.2 After bootstrap
@@ -354,3 +370,4 @@ Cloned both repos into `reference/`. Two delegated explore agents produced the f
 | Reference clone — T3 Code | `reference/t3code/` (gitignored) |
 | Reference clone — Jean Claude | `reference/jean-claude/` (gitignored) |
 | Tooling pins | `.mise.toml` (Node 24.13.1, Bun 1.3.9) |
+```
