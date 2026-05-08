@@ -48,7 +48,7 @@ import {
   OrchestrationReplayEventsInput,
   OrchestrationRpcSchemas,
 } from "./orchestration.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 import {
   ProjectSearchEntriesError,
   ProjectSearchEntriesInput,
@@ -124,6 +124,7 @@ export const WS_METHODS = {
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
+  serverDetectExistingProviderHomes: "server.detectExistingProviderHomes",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
@@ -174,6 +175,39 @@ export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscov
   payload: Schema.Struct({}),
   success: SourceControlDiscoveryResult,
 });
+
+/**
+ * Each candidate is one well-known credential directory the server
+ * checked for. `exists` tells the client whether the path resolved on
+ * disk; `alreadyConfigured` flags candidates whose `homePath` is
+ * already referenced by an existing provider instance, so the import
+ * UI can show them as already-imported instead of offering to import
+ * a duplicate.
+ */
+export const ServerDetectedProviderHome = Schema.Struct({
+  driver: ProviderDriverKind,
+  /** Original (unexpanded) path with tilde, e.g. `~/.claude`. Suitable for showing to the user and for `homePath` config writes. */
+  path: Schema.String,
+  /** Filesystem-resolved absolute path with tilde expanded. */
+  resolvedPath: Schema.String,
+  exists: Schema.Boolean,
+  alreadyConfigured: Schema.Boolean,
+});
+export type ServerDetectedProviderHome = typeof ServerDetectedProviderHome.Type;
+
+export const ServerDetectExistingProviderHomesResult = Schema.Struct({
+  candidates: Schema.Array(ServerDetectedProviderHome),
+});
+export type ServerDetectExistingProviderHomesResult =
+  typeof ServerDetectExistingProviderHomesResult.Type;
+
+export const WsServerDetectExistingProviderHomesRpc = Rpc.make(
+  WS_METHODS.serverDetectExistingProviderHomes,
+  {
+    payload: Schema.Struct({}),
+    success: ServerDetectExistingProviderHomesResult,
+  },
+);
 
 export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   payload: ProjectSearchEntriesInput,
@@ -381,6 +415,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,
+  WsServerDetectExistingProviderHomesRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,

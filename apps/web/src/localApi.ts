@@ -117,6 +117,7 @@ export function createLocalApi(rpcClient: WsRpcClient): LocalApi {
       getSettings: rpcClient.server.getSettings,
       updateSettings: rpcClient.server.updateSettings,
       discoverSourceControl: rpcClient.server.discoverSourceControl,
+      detectExistingProviderHomes: rpcClient.server.detectExistingProviderHomes,
     },
   };
 }

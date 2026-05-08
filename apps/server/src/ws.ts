@@ -39,6 +39,7 @@ import {
   observeRpcStream,
   observeRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
+import { detectExistingProviderHomes } from "./provider/detectExistingProviderHomes.ts";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
@@ -790,6 +791,21 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
           observeRpcEffect(
             WS_METHODS.serverDiscoverSourceControl,
             sourceControlDiscovery.discover,
+            {
+              "rpc.aggregate": "server",
+            },
+          ),
+        [WS_METHODS.serverDetectExistingProviderHomes]: (_input) =>
+          observeRpcEffect(
+            WS_METHODS.serverDetectExistingProviderHomes,
+            serverSettings.getSettings.pipe(
+              Effect.orElseSucceed(() => ({
+                providerInstances: {} as Record<string, never>,
+              })),
+              Effect.flatMap((settings) =>
+                detectExistingProviderHomes(settings.providerInstances ?? {}),
+              ),
+            ),
             {
               "rpc.aggregate": "server",
             },
