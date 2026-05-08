@@ -4,11 +4,14 @@ import {
   ChevronDownIcon,
   ClipboardCopyIcon,
   KeyRoundIcon,
+  Link2Icon,
   PlusIcon,
   Trash2Icon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+
+import { ensureLocalApi } from "../../localApi";
 import {
   isProviderDriverKind,
   type ProviderInstanceConfig,
@@ -426,6 +429,129 @@ function ProviderEnvironmentSection(props: {
   );
 }
 
+function ProviderSharedSettingsPanel(props: {
+  readonly driverKind: ProviderDriverKind | null;
+  readonly config: unknown;
+}) {
+  const supportsShare = props.driverKind === "claudeAgent" || props.driverKind === "codex";
+  const homePath = readConfigString(props.config, "homePath");
+  const [status, setStatus] = useState<{
+    isSymlink: boolean;
+    linkedToShared: boolean;
+    sharedExists: boolean;
+    isLocalFile: boolean;
+    sharedPath: string;
+  } | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isMutating, setIsMutating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    if (!supportsShare || !props.driverKind || homePath.length === 0) {
+      setStatus(null);
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    try {
+      const result = await ensureLocalApi().server.getSharedSettingsStatus({
+        driver: props.driverKind,
+        homePath,
+      });
+      setStatus({
+        isSymlink: result.isSymlink,
+        linkedToShared: result.linkedToShared,
+        sharedExists: result.sharedExists,
+        isLocalFile: result.isLocalFile,
+        sharedPath: result.sharedPath,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not read shared settings status.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [homePath, props.driverKind, supportsShare]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  if (!supportsShare) return null;
+
+  const handleToggle = async () => {
+    if (!props.driverKind || homePath.length === 0) return;
+    setIsMutating(true);
+    setError(null);
+    try {
+      const action = status?.linkedToShared
+        ? ensureLocalApi().server.disableSharedSettings
+        : ensureLocalApi().server.enableSharedSettings;
+      await action({ driver: props.driverKind, homePath });
+      toastManager.add({
+        type: "success",
+        title: status?.linkedToShared
+          ? "Stopped sharing settings.json"
+          : "settings.json now shared with other accounts of this driver",
+      });
+      await refresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Operation failed.";
+      setError(message);
+      toastManager.add({
+        type: "error",
+        title: "Could not update shared settings",
+        description: message,
+      });
+    } finally {
+      setIsMutating(false);
+    }
+  };
+
+  const disabled = isMutating || isLoading || homePath.length === 0;
+  const heading = status?.linkedToShared ? "Sharing this file" : "Share this file";
+  const buttonLabel = status?.linkedToShared ? "Stop sharing" : "Share with other accounts";
+
+  return (
+    <div className="border-t border-border/60 px-4 py-3 sm:px-5">
+      <div className="flex items-center gap-2">
+        <Link2Icon className="size-4 text-muted-foreground" aria-hidden="true" />
+        <span className="text-xs font-medium text-foreground">Shared settings.json</span>
+      </div>
+      {homePath.length === 0 ? (
+        <p className="mt-1 text-xs text-muted-foreground">
+          Set a home path on this instance to enable shared settings.
+        </p>
+      ) : (
+        <>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {status?.linkedToShared
+              ? `${heading} — settings.json is a symlink to ${status.sharedPath}.`
+              : `${heading} — links this instance's settings.json to ~/.codemngr/shared/${props.driverKind}/settings.json so other accounts of the same driver can read the same file.`}
+          </p>
+          {status && status.isLocalFile && status.sharedExists && !status.linkedToShared ? (
+            <p className="mt-1 text-[11px] text-amber-700 dark:text-amber-400">
+              Both local and shared files exist; enabling will back up the local copy as
+              settings.json.backup-&lt;timestamp&gt; before linking.
+            </p>
+          ) : null}
+          {error ? <p className="mt-1 text-[11px] text-destructive">{error}</p> : null}
+          <div className="mt-2">
+            <Button
+              type="button"
+              size="sm"
+              variant={status?.linkedToShared ? "outline" : "default"}
+              onClick={() => void handleToggle()}
+              disabled={disabled}
+            >
+              {isMutating ? "Working…" : buttonLabel}
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ProviderSignInPanel(props: {
   readonly driverKind: ProviderDriverKind | null;
   readonly config: unknown;
@@ -807,6 +933,7 @@ export function ProviderInstanceCard({
             ) : null}
 
             <ProviderSignInPanel driverKind={driverKind} config={instance.config} />
+            <ProviderSharedSettingsPanel driverKind={driverKind} config={instance.config} />
 
             {driverOption !== undefined ? (
               <ProviderModelsSection

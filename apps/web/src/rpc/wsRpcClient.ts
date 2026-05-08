@@ -125,6 +125,11 @@ export interface WsRpcClient {
     readonly detectExistingProviderHomes: RpcUnaryNoArgMethod<
       typeof WS_METHODS.serverDetectExistingProviderHomes
     >;
+    readonly getSharedSettingsStatus: RpcUnaryMethod<
+      typeof WS_METHODS.serverGetSharedSettingsStatus
+    >;
+    readonly enableSharedSettings: RpcUnaryMethod<typeof WS_METHODS.serverEnableSharedSettings>;
+    readonly disableSharedSettings: RpcUnaryMethod<typeof WS_METHODS.serverDisableSharedSettings>;
     readonly subscribeConfig: RpcStreamMethod<typeof WS_METHODS.subscribeServerConfig>;
     readonly subscribeLifecycle: RpcStreamMethod<typeof WS_METHODS.subscribeServerLifecycle>;
     readonly subscribeAuthAccess: RpcStreamMethod<typeof WS_METHODS.subscribeAuthAccess>;
@@ -234,6 +239,12 @@ export function createWsRpcClient(transport: WsTransport): WsRpcClient {
         transport.request((client) => client[WS_METHODS.serverDiscoverSourceControl]({})),
       detectExistingProviderHomes: () =>
         transport.request((client) => client[WS_METHODS.serverDetectExistingProviderHomes]({})),
+      getSharedSettingsStatus: (input) =>
+        transport.request((client) => client[WS_METHODS.serverGetSharedSettingsStatus](input)),
+      enableSharedSettings: (input) =>
+        transport.request((client) => client[WS_METHODS.serverEnableSharedSettings](input)),
+      disableSharedSettings: (input) =>
+        transport.request((client) => client[WS_METHODS.serverDisableSharedSettings](input)),
       subscribeConfig: (listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.subscribeServerConfig]({}),

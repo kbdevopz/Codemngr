@@ -125,6 +125,9 @@ export const WS_METHODS = {
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverDetectExistingProviderHomes: "server.detectExistingProviderHomes",
+  serverGetSharedSettingsStatus: "server.getSharedSettingsStatus",
+  serverEnableSharedSettings: "server.enableSharedSettings",
+  serverDisableSharedSettings: "server.disableSharedSettings",
 
   // Streaming subscriptions
   subscribeVcsStatus: "subscribeVcsStatus",
@@ -208,6 +211,58 @@ export const WsServerDetectExistingProviderHomesRpc = Rpc.make(
     success: ServerDetectExistingProviderHomesResult,
   },
 );
+
+export const SharedSettingsStatus = Schema.Struct({
+  localPath: Schema.String,
+  sharedPath: Schema.String,
+  isSymlink: Schema.Boolean,
+  symlinkTarget: Schema.NullOr(Schema.String),
+  linkedToShared: Schema.Boolean,
+  isLocalFile: Schema.Boolean,
+  sharedExists: Schema.Boolean,
+  localContentHash: Schema.NullOr(Schema.String),
+  sharedContentHash: Schema.NullOr(Schema.String),
+});
+export type SharedSettingsStatus = typeof SharedSettingsStatus.Type;
+
+export const SharedSettingsActionPayload = Schema.Struct({
+  driver: ProviderDriverKind,
+  homePath: Schema.String,
+});
+export type SharedSettingsActionPayload = typeof SharedSettingsActionPayload.Type;
+
+export class SharedSettingsRpcError extends Schema.TaggedErrorClass<SharedSettingsRpcError>()(
+  "SharedSettingsRpcError",
+  {
+    code: Schema.Literals(["missing-home-path", "local-is-symlink-elsewhere", "fs-error"]),
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+export const WsServerGetSharedSettingsStatusRpc = Rpc.make(
+  WS_METHODS.serverGetSharedSettingsStatus,
+  {
+    payload: SharedSettingsActionPayload,
+    success: SharedSettingsStatus,
+    error: SharedSettingsRpcError,
+  },
+);
+
+export const WsServerEnableSharedSettingsRpc = Rpc.make(WS_METHODS.serverEnableSharedSettings, {
+  payload: SharedSettingsActionPayload,
+  success: SharedSettingsStatus,
+  error: SharedSettingsRpcError,
+});
+
+export const WsServerDisableSharedSettingsRpc = Rpc.make(WS_METHODS.serverDisableSharedSettings, {
+  payload: SharedSettingsActionPayload,
+  success: SharedSettingsStatus,
+  error: SharedSettingsRpcError,
+});
 
 export const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   payload: ProjectSearchEntriesInput,
@@ -416,6 +471,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerDetectExistingProviderHomesRpc,
+  WsServerGetSharedSettingsStatusRpc,
+  WsServerEnableSharedSettingsRpc,
+  WsServerDisableSharedSettingsRpc,
   WsProjectsSearchEntriesRpc,
   WsProjectsWriteFileRpc,
   WsShellOpenInEditorRpc,

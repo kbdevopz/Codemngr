@@ -118,6 +118,9 @@ export function createLocalApi(rpcClient: WsRpcClient): LocalApi {
       updateSettings: rpcClient.server.updateSettings,
       discoverSourceControl: rpcClient.server.discoverSourceControl,
       detectExistingProviderHomes: rpcClient.server.detectExistingProviderHomes,
+      getSharedSettingsStatus: rpcClient.server.getSharedSettingsStatus,
+      enableSharedSettings: rpcClient.server.enableSharedSettings,
+      disableSharedSettings: rpcClient.server.disableSharedSettings,
     },
   };
 }

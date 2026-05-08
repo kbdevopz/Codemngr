@@ -40,6 +40,13 @@ import {
   observeRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import { detectExistingProviderHomes } from "./provider/detectExistingProviderHomes.ts";
+import {
+  disableSharedSettings,
+  enableSharedSettings,
+  getSharedSettingsStatus,
+  SharedSettingsError,
+} from "./provider/sharedSettingsManager.ts";
+import { SharedSettingsRpcError } from "@t3tools/contracts";
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry.ts";
 import { ServerLifecycleEvents } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup.ts";
@@ -90,6 +97,16 @@ function isThreadDetailEvent(event: OrchestrationEvent): event is Extract<
 }
 
 const PROVIDER_STATUS_DEBOUNCE_MS = 200;
+
+function toSharedSettingsErrorPayload(err: unknown): SharedSettingsRpcError {
+  if (err instanceof SharedSettingsError) {
+    return new SharedSettingsRpcError({ code: err.code, detail: err.message });
+  }
+  return new SharedSettingsRpcError({
+    code: "fs-error",
+    detail: err instanceof Error ? err.message : "Filesystem error.",
+  });
+}
 
 function toAuthAccessStreamEvent(
   change: BootstrapCredentialChange | SessionCredentialChange,
@@ -809,6 +826,33 @@ const makeWsRpcLayer = (currentSessionId: AuthSessionId) =>
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.serverGetSharedSettingsStatus]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverGetSharedSettingsStatus,
+            Effect.tryPromise({
+              try: () => getSharedSettingsStatus(input),
+              catch: toSharedSettingsErrorPayload,
+            }),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverEnableSharedSettings]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverEnableSharedSettings,
+            Effect.tryPromise({
+              try: () => enableSharedSettings(input),
+              catch: toSharedSettingsErrorPayload,
+            }),
+            { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.serverDisableSharedSettings]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverDisableSharedSettings,
+            Effect.tryPromise({
+              try: () => disableSharedSettings(input),
+              catch: toSharedSettingsErrorPayload,
+            }),
+            { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.projectsSearchEntries]: (input) =>
           observeRpcEffect(
