@@ -107,16 +107,13 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 ### Phase 2 — Multi-account: surface what's already there
 **Goal**: Let the user create and switch between multiple Claude accounts via the UI without writing any new provider code.
 
-1. **Settings model**: extend the user-facing settings UI so each provider can list multiple instances. The schema (`ProviderInstanceConfigMap`) already supports this — change `ProviderInstanceRegistryHydration.ts` to stop synthesizing a single legacy entry when multiple are configured.
-2. **Account list UI**: per provider, show all configured instances with their detected account info (email, subscription type) from the existing snapshot. Probably a new sidebar / settings tab.
+1. **Settings model**: ✅ Done in `6d2fec77`. `ProviderInstanceRegistryHydration.deriveProviderInstanceConfigMap` no longer synthesizes a phantom default entry when explicit instances exist for a driver. Tests cover legacy-only, explicit-only, multi-explicit, and mixed cases.
+2. **Account list UI**: ✅ Already in T3. The settings panel renders one card per `providerInstances` entry, grouped by driver. Each card already shows detected account info (email, subscription type) when probed.
 3. **"Add Account" flow** (Claude first):
-   - Prompt for a label (e.g. "Cogwheel", "Personal").
-   - Create `~/.codemngr/accounts/claude/<slug>/`.
-   - Add a new `providerInstances.claude.<slug>` entry with `homePath` set.
-   - Spawn `claude /login` in a subprocess with `CLAUDE_CONFIG_DIR` set to that dir.
-   - On success, refresh the snapshot — new account appears in the list.
-4. **Same flow for Codex** with `CODEX_HOME` and `codex login`.
-5. **Project → account binding**: each project's settings carries `{ provider, instanceId }`. When spawning a session for that project, pass `instanceId` to the provider service so it picks the right `ProviderInstance`.
+   - ✅ Dialog auto-suggests `~/.codemngr/accounts/<driver>/<slug>` for `homePath` when adding a new Codex/Claude instance (`ed89e1af`).
+   - ❌ Login subprocess auto-spawn — see Session A below.
+4. **Same flow for Codex** with `CODEX_HOME` and `codex login` — see Session B below.
+5. **Project → account binding**: mechanism already in T3 (`project.defaultModelSelection.instanceId`); per-thread picker in the composer already lets the user pick instance + model. UI for setting a project-level default — see Session C below.
 
 ### Phase 3 — Detection of existing accounts (first-run import)
 1. On first launch, scan `~/.claude`, `~/.codex`, `~/.config/anthropic`, `~/.config/openai` — wherever Claude Code / Codex CLI store credentials.
@@ -140,6 +137,40 @@ The mechanism is **per-instance**, so once we expose multi-instance config in th
 2. Replace T3 branding in the UI (logo, name, color scheme).
 3. Marketing site at codemngr.com — fork or rebuild `apps/marketing/`.
 4. Codesigning + distribution (Homebrew cask, winget, AppImage). T3 already has `dist:desktop:*` scripts in `package.json`.
+
+---
+
+## 4b. Session Breakdown — Resumable Work Slices
+
+Each row is a self-contained chunk that can be picked up by a fresh session without page-faulting on context. Sessions are independent unless **Depends on** says otherwise. "Effort" is rough planning, not a hard estimate.
+
+| ID | Title | Phase | Effort | Depends on | Deliverable |
+|---|---|---|---|---|---|
+| **A** | Claude login subprocess flow | 2.3 | 3–4 hr | — | Server RPC `provider.account.login(instanceId)` that spawns `claude /login` with `CLAUDE_CONFIG_DIR` set, streams stdout (the OAuth URL) to the client, refreshes the provider snapshot on completion. New "Sign in" button on the Claude instance card in settings. Toast on success/failure. Tests for the new RPC. |
+| **B** | Codex login subprocess flow | 2.4 | 1–2 hr | A | Mirror of Session A for Codex (`codex login`, `CODEX_HOME`). Mostly extracts a generic `spawnLoginCommand` helper from A and wires up the Codex driver. |
+| **C** | Project → account binding UI | 2.5 | 2–3 hr | — | Project settings dialog (extend the existing rename dialog or add a new one). Field: "Default model + account for new threads in this project" using the existing model picker. Wires into `project.meta.update` with `defaultModelSelection`. New thread creation reads from this default. Tests for the picker integration. |
+| **D** | First-run import scanner | 3 | 3–4 hr | — | Server-side scanner module that probes `~/.claude`, `~/.codex`, `~/.config/anthropic`, `~/.config/openai` and uses the existing T3 probe helpers to identify each. New first-run modal in the client showing detected logins with checkboxes. Importing copies the dir into `~/.codemngr/accounts/<provider>/<auto-named>/` and adds the `providerInstances` entry. |
+| **E** | Shared settings symlink layer | 4 | 3–4 hr | A or B | UI to mark `settings.json` / `hooks/` / `agents/` files as shared. Server-side helper that creates `~/.codemngr/shared/` and symlinks chosen files from each account's home into it. "Promote to local" button breaks the link for one account. |
+| **F1** | codemngr.com backend skeleton | 5 | 4–6 hr | — | Effect-based RPC server skeleton at the codemngr.com origin. Auth with passphrase-derived key. Endpoints: `accounts.list`, `accounts.upsert`, `projectAssignments.list`, `projectAssignments.upsert`. Encryption envelope with a libsodium-style sealed box. No actual sync logic yet. |
+| **F2** | Client sync wiring | 5 | 3–4 hr | F1 | Client-side reconciliation loop: pull on launch, push debounced on local changes, conflict resolution (last-write-wins per record). UI status indicator. |
+| **G** | Workspace + branding rename | 6 | 2–3 hr | every other session | Mass `@t3tools/*` → `@codemngr/*` rename across `package.json` workspaces, imports, CI configs. Replace T3 logo/name/colors in the UI. Update `apps/marketing/`. Done last so upstream merges stay easy until then. |
+
+### Recommended order
+
+1. **C** (project → account binding) — biggest UX win, no server work, immediately visible to the user.
+2. **A** (Claude login) — unlocks the headline "Add Account → click Sign in" flow. After this and **C**, the multi-account loop is end-to-end usable.
+3. **B** (Codex login) — small follow-on after A.
+4. **D** (first-run import) — onboarding polish; useful but the user can manually add accounts before this lands.
+5. **E** (shared settings) — Jean Claude parity feature; valuable but not blocking core functionality.
+6. **F1** + **F2** (cross-PC sync) — separate workstream, likely several sessions.
+7. **G** (branding) — last, after the feature surface is stable.
+
+### Carrying state between sessions
+
+- All session work lands on `claude/codemngr-multi-account-setup-msneX` until we cut a release branch.
+- Each session's first commit message references the session ID (e.g. `feat(account): Claude login subprocess (Session A)`).
+- This `PLAN.md` is the source of truth for what's done — update the "Phase 2/3/4/…" checkboxes inline as work lands so a returning session can read the current state without re-deriving it from git log.
+- Open questions discovered during a session go to Section 6 of this file so they don't get lost between sessions.
 
 ---
 
