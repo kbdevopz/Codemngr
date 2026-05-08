@@ -86,6 +86,13 @@ import { useShortcutModifierState } from "../shortcutModifierState";
 import { useGitStatus } from "../lib/gitStatusState";
 import { readLocalApi } from "../localApi";
 import { useComposerDraftStore } from "../composerDraftStore";
+import {
+  deriveProviderInstanceEntries,
+  sortProviderInstanceEntries,
+  type ProviderInstanceEntry,
+} from "../providerInstances";
+import { useServerConfig } from "../rpc/serverState";
+import { ProviderInstanceId, type ModelSelection } from "@t3tools/contracts";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { retainThreadDetailSubscription } from "../environments/runtime/service";
 
@@ -1130,6 +1137,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     null,
   );
   const [projectRenameTitle, setProjectRenameTitle] = useState("");
+  const [projectDefaultInstanceId, setProjectDefaultInstanceId] = useState<string>("");
   const [projectGroupingTarget, setProjectGroupingTarget] =
     useState<SidebarProjectGroupMember | null>(null);
   const [projectGroupingSelection, setProjectGroupingSelection] = useState<
@@ -1340,6 +1348,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const openProjectRenameDialog = useCallback((member: SidebarProjectGroupMember) => {
     setProjectRenameTarget(member);
     setProjectRenameTitle(member.name);
+    setProjectDefaultInstanceId(member.defaultModelSelection?.instanceId ?? "");
   }, []);
 
   const openProjectGroupingDialog = useCallback(
@@ -1565,7 +1574,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const clicked = await api.contextMenu.show(
           [
-            buildTargetedItem("rename", "Rename project"),
+            buildTargetedItem("rename", "Project settings"),
             buildTargetedItem("grouping", "Project grouping…"),
             buildTargetedItem("copy-path", "Copy Project Path"),
             buildTargetedItem("delete", "Remove project", {
@@ -1884,7 +1893,16 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const closeProjectRenameDialog = useCallback(() => {
     setProjectRenameTarget(null);
     setProjectRenameTitle("");
+    setProjectDefaultInstanceId("");
   }, []);
+
+  const serverConfig = useServerConfig();
+  const projectSettingsInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(() => {
+    if (!serverConfig?.providers) return [];
+    return sortProviderInstanceEntries(
+      deriveProviderInstanceEntries(serverConfig.providers),
+    ).filter((entry) => entry.isAvailable && entry.models.length > 0);
+  }, [serverConfig?.providers]);
 
   const submitProjectRename = useCallback(async () => {
     if (!projectRenameTarget) {
@@ -1900,7 +1918,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       return;
     }
 
-    if (trimmed === projectRenameTarget.name) {
+    const titleChanged = trimmed !== projectRenameTarget.name;
+    const previousInstanceId = projectRenameTarget.defaultModelSelection?.instanceId ?? "";
+    const defaultInstanceChanged = projectDefaultInstanceId !== previousInstanceId;
+
+    if (!titleChanged && !defaultInstanceChanged) {
       closeProjectRenameDialog();
       return;
     }
@@ -1910,11 +1932,35 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to rename project",
+          title: "Failed to update project",
           description: "Project API unavailable.",
         }),
       );
       return;
+    }
+
+    let nextDefaultModelSelection: ModelSelection | null | undefined;
+    if (defaultInstanceChanged) {
+      if (projectDefaultInstanceId.length === 0) {
+        nextDefaultModelSelection = null;
+      } else {
+        const branded = ProviderInstanceId.make(projectDefaultInstanceId);
+        const entry = projectSettingsInstanceEntries.find(
+          (candidate) => candidate.instanceId === branded,
+        );
+        const firstModel = entry?.models[0]?.slug;
+        if (!firstModel) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: "Default account has no models available",
+              description: "Pick another account or wait for the provider to come online.",
+            }),
+          );
+          return;
+        }
+        nextDefaultModelSelection = { instanceId: branded, model: firstModel };
+      }
     }
 
     try {
@@ -1922,19 +1968,28 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         type: "project.meta.update",
         commandId: newCommandId(),
         projectId: projectRenameTarget.id,
-        title: trimmed,
+        ...(titleChanged ? { title: trimmed } : {}),
+        ...(defaultInstanceChanged
+          ? { defaultModelSelection: nextDefaultModelSelection ?? null }
+          : {}),
       });
       closeProjectRenameDialog();
     } catch (error) {
       toastManager.add(
         stackedThreadToast({
           type: "error",
-          title: "Failed to rename project",
+          title: "Failed to update project",
           description: error instanceof Error ? error.message : "An error occurred.",
         }),
       );
     }
-  }, [closeProjectRenameDialog, projectRenameTarget, projectRenameTitle]);
+  }, [
+    closeProjectRenameDialog,
+    projectDefaultInstanceId,
+    projectRenameTarget,
+    projectRenameTitle,
+    projectSettingsInstanceEntries,
+  ]);
 
   const closeProjectGroupingDialog = useCallback(() => {
     setProjectGroupingTarget(null);
@@ -2185,11 +2240,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       >
         <DialogPopup className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>Rename project</DialogTitle>
+            <DialogTitle>Project settings</DialogTitle>
             <DialogDescription>
               {projectRenameTarget
-                ? `Update the title for ${projectRenameTarget.cwd}.`
-                : "Update the project title."}
+                ? `Update settings for ${projectRenameTarget.cwd}.`
+                : "Update project settings."}
             </DialogDescription>
           </DialogHeader>
           <DialogPanel className="space-y-4">
@@ -2206,6 +2261,28 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
                   }
                 }}
               />
+            </div>
+            <div className="grid gap-1.5">
+              <span className="text-xs font-medium text-foreground">Default account</span>
+              <Select
+                value={projectDefaultInstanceId}
+                onValueChange={(value) => setProjectDefaultInstanceId(value ?? "")}
+              >
+                <SelectTrigger aria-label="Default account">
+                  <SelectValue placeholder="Use the global default" />
+                </SelectTrigger>
+                <SelectPopup>
+                  <SelectItem value="">Use the global default</SelectItem>
+                  {projectSettingsInstanceEntries.map((entry) => (
+                    <SelectItem key={entry.instanceId} value={entry.instanceId}>
+                      {entry.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+              <p className="text-[11px] text-muted-foreground">
+                New threads in this project will start with this account selected.
+              </p>
             </div>
             {projectRenameTarget?.environmentLabel ? (
               <p className="text-xs text-muted-foreground">
