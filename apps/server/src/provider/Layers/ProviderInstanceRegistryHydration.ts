@@ -60,38 +60,47 @@ import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistry
  *
  * Strategy:
  *   1. Copy all explicit `settings.providerInstances` entries verbatim.
- *   2. For each built-in driver whose `defaultInstanceIdForDriver(id)` key
- *      is *not* already in the explicit map, synthesize an entry from the
- *      matching legacy `settings.providers.<kind>` blob.
+ *   2. For each built-in driver: if the user has *any* explicit
+ *      `providerInstances` entry for that driver, the legacy
+ *      `providers.<kind>` blob is ignored. Otherwise we synthesize a
+ *      single default entry from it under
+ *      `defaultInstanceIdForDriver(driverKind)` so single-account
+ *      legacy configs still hydrate.
  *
- * The returned map is the input the registry consumes; pure & exported
- * separately so the hydration logic can be exercised by unit tests
- * without layering.
+ * The previous version only skipped synthesis when the *default*
+ * instance id was already in the explicit map; with multi-account
+ * setups the user's explicit entries (e.g. `codex_work`,
+ * `codex_personal`) coexisted with a phantom "codex" default
+ * synthesized from the legacy blob, polluting the registry.
+ *
+ * Pure & exported separately so the hydration logic can be exercised
+ * by unit tests without layering.
  */
 export const deriveProviderInstanceConfigMap = (
   settings: ServerSettings,
 ): ProviderInstanceConfigMap => {
   const merged: Record<string, ProviderInstanceConfig> = { ...settings.providerInstances };
 
+  const driverKindsWithExplicitInstance = new Set<string>();
+  for (const entry of Object.values(settings.providerInstances)) {
+    driverKindsWithExplicitInstance.add(entry.driver);
+  }
+
   for (const driver of BUILT_IN_DRIVERS) {
-    const instanceId = defaultInstanceIdForDriver(driver.driverKind);
-    if (instanceId in merged) {
-      // Explicit `providerInstances` entry for this slot — user-authored
-      // config always wins over the legacy mirror.
+    if (driverKindsWithExplicitInstance.has(driver.driverKind)) {
       continue;
     }
 
     // Only built-in drivers have a legacy mirror; the registry's
     // `providers` struct is keyed on the same literal slug as
-    // `driverKind`. Access is dynamic (the driver kind is a branded string),
-    // but it's constrained to `keyof settings.providers` by the union of
-    // built-in driver kinds.
+    // `driverKind`.
     const legacyKey = driver.driverKind as keyof ServerSettings["providers"];
     const legacyConfig = settings.providers[legacyKey];
     if (legacyConfig === undefined) {
       continue;
     }
 
+    const instanceId = defaultInstanceIdForDriver(driver.driverKind);
     merged[instanceId] = {
       driver: driver.driverKind,
       config: legacyConfig,
