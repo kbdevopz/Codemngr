@@ -59,6 +59,17 @@ function deriveInstanceId(driver: ProviderDriverKind, label: string): string {
   return slug ? `${driver}_${slug}` : "";
 }
 
+// Suggested per-account credential directory under the codemngr root.
+// Tilde expansion happens server-side; both Codex and Claude already
+// accept tilde-prefixed paths in their homePath fields.
+function suggestCodemngrHomePath(driver: ProviderDriverKind, label: string): string {
+  const slug = slugifyLabel(label);
+  if (!slug) return "";
+  return `~/.codemngr/accounts/${driver}/${slug}`;
+}
+
+const DRIVERS_WITH_HOME_PATH: ReadonlySet<string> = new Set(["codex", "claudeAgent"]);
+
 const INSTANCE_ID_PATTERN = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
 const DEFAULT_DRIVER_OPTION = DRIVER_OPTIONS[0]!;
@@ -125,6 +136,13 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   // Driver-specific config drafts keyed by driver so toggling between drivers
   // during the same dialog session does not lose in-progress input.
   const [configByDriver, setConfigByDriver] = useState<Record<string, Record<string, unknown>>>({});
+  // Per-driver flag tracking whether the user has touched homePath. While
+  // false the dialog auto-fills it with the codemngr-suggested path so a
+  // new account gets isolated credentials by default; once the user edits
+  // homePath manually we stop overwriting it.
+  const [homePathTouchedByDriver, setHomePathTouchedByDriver] = useState<Record<string, boolean>>(
+    {},
+  );
   // Errors are suppressed until the user has tried to submit once. After that
   // they update live so fixing the problem clears the message in place.
   const [hasAttemptedSubmit, setHasAttemptedSubmit] = useState(false);
@@ -145,6 +163,7 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     setWizardStep(0);
     setInstanceIdDirty(false);
     setConfigByDriver({});
+    setHomePathTouchedByDriver({});
     setHasAttemptedSubmit(false);
   }, [open]);
 
@@ -154,6 +173,27 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
     if (instanceIdDirty) return;
     setInstanceId(deriveInstanceId(driver, label));
   }, [driver, label, instanceIdDirty]);
+
+  // Auto-suggest a codemngr-rooted homePath until the user edits it.
+  useEffect(() => {
+    if (!DRIVERS_WITH_HOME_PATH.has(driver)) return;
+    if (homePathTouchedByDriver[driver]) return;
+    const suggested = suggestCodemngrHomePath(driver, label);
+    setConfigByDriver((existing) => {
+      const draft = existing[driver] ?? {};
+      if (suggested.length === 0) {
+        if (!("homePath" in draft)) return existing;
+        const { homePath: _omit, ...rest } = draft;
+        if (Object.keys(rest).length === 0) {
+          const { [driver]: _drop, ...others } = existing;
+          return others;
+        }
+        return { ...existing, [driver]: rest };
+      }
+      if (draft.homePath === suggested) return existing;
+      return { ...existing, [driver]: { ...draft, homePath: suggested } };
+    });
+  }, [driver, label, homePathTouchedByDriver]);
 
   const driverOption = DRIVER_OPTION_BY_VALUE[driver] ?? DEFAULT_DRIVER_OPTION;
   const driverSettingsFields = useMemo(
@@ -169,17 +209,24 @@ export function AddProviderInstanceDialog({ open, onOpenChange }: AddProviderIns
   const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
   const setConfigDraft = useCallback(
     (config: Record<string, unknown> | undefined) => {
+      // Detect a homePath edit before we overwrite the per-driver bucket,
+      // so the auto-suggest effect stops overwriting the user's value.
+      const previous = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
+      const next = config ?? EMPTY_CONFIG_DRAFT;
+      if (DRIVERS_WITH_HOME_PATH.has(driver) && previous.homePath !== next.homePath) {
+        setHomePathTouchedByDriver((map) => ({ ...map, [driver]: true }));
+      }
       setConfigByDriver((existing) => {
-        const next = { ...existing };
+        const merged = { ...existing };
         if (config === undefined || Object.keys(config).length === 0) {
-          delete next[driver];
+          delete merged[driver];
         } else {
-          next[driver] = config;
+          merged[driver] = config;
         }
-        return next;
+        return merged;
       });
     },
-    [driver],
+    [configByDriver, driver],
   );
 
   const handleSave = useCallback(() => {
